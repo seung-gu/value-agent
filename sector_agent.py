@@ -51,7 +51,7 @@ class Deps:
 # agent
 # ---------------------------------------------------------------------------
 sector_agent = Agent(
-    os.environ.get("LLM_MODEL", "anthropic:claude-sonnet-4-6"),
+    os.environ.get("LLM_MODEL", "openai:gpt-5"),
     deps_type=Deps,
     output_type=SectorAnalysis,
     retries=2,  # output_validator(ModelRetry) budget -- retry on format/quality failure

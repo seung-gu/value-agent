@@ -16,9 +16,9 @@ Refs:
 - output validators / ModelRetry: https://ai.pydantic.dev/output/
 - LLM-as-a-judge pattern:         https://deepeval.com/guides/guides-llm-as-a-judge
 """
-
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from dotenv import load_dotenv
@@ -28,10 +28,6 @@ from pydantic_ai.usage import RunUsage
 
 load_dotenv()  # load .env before judge_agent is created (independent of import order)
 
-# To reduce bias, using a different model family from the agent under test is
-# recommended (avoids self-preference bias).
-JUDGE_MODEL = "anthropic:claude-sonnet-4-6"
-
 
 class Verdict(BaseModel):
     passed: bool
@@ -40,7 +36,7 @@ class Verdict(BaseModel):
 
 # Generic verifier, not tied to any rubric. The rubric is passed per call as the user message.
 judge_agent = Agent(
-    JUDGE_MODEL,
+    os.getenv("JUDGE_MODEL", "openai:gpt-5-mini"),
     output_type=Verdict,
     system_prompt=(
         "You are a pragmatic, impartial verifier. You are given a RUBRIC and an OUTPUT, "
