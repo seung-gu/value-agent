@@ -1,14 +1,16 @@
 """
-섹터 분석 agent (탑다운 출발점).
+Sector analysis agent (top-down entry point).
 
-미국 증시 GICS 섹터 하나를 받아, 웹 검색(Serper)으로 성장성·잠재성을 조사하고
-SectorAnalysis 구조로 결과를 반환한다. 경쟁력 있는 기업 발굴까지 포함.
+Takes one US GICS sector, researches its growth/potential via web search (Serper),
+and returns a SectorAnalysis. Also discovers competitive companies.
 
-검증 2층 (둘 다 @output_validator에서 수행 → 실패 시 ModelRetry로 PydanticAI가 자동 재조사):
-- 1층 (형식·근거): 결정적 체크 (출처 개수, 경쟁사, 필수 필드).
-- 2층 (주관 품질): 범용 judge_agent에 섹터 rubric을 넘겨 출처 신뢰도·최신성 판정.
+Two-layer validation (both run in @output_validator -> on failure ModelRetry makes
+PydanticAI re-analyze automatically):
+- Layer 1 (format/evidence): deterministic checks (source count, companies, required fields).
+- Layer 2 (subjective quality): pass the sector rubric to the generic judge_agent to
+  assess source reputation / recency.
 
-실행:
+Run:
     uv run sector_agent.py
 """
 
@@ -28,21 +30,21 @@ from judge_agent import judge
 from models import SectorAnalysis
 from search import SearchClient, SerperClient
 
-load_dotenv()  # .env에서 LLM_MODEL, ANTHROPIC_API_KEY, SERPER_API_KEY 로드
+load_dotenv()  # load LLM_MODEL, ANTHROPIC_API_KEY, SERPER_API_KEY from .env
 
-# 관측(observability): agent·LLM·tool 호출을 logfire로 추적.
-# send_to_logfire="if-token-present" → 토큰 없으면 조용히 로컬, 있으면 클라우드 전송.
+# Observability: trace agent / LLM / tool calls with logfire.
+# send_to_logfire="if-token-present" -> local-only without a token, cloud with one.
 logfire.configure(send_to_logfire="if-token-present")
-logfire.instrument_pydantic_ai()  # 모든 agent 실행 계측
-logfire.instrument_httpx()         # Serper 호출까지 추적
+logfire.instrument_pydantic_ai()  # instrument every agent run
+logfire.instrument_httpx()         # also trace Serper calls
 
 
 # ---------------------------------------------------------------------------
-# 의존성 (deps) — 런타임에 주입
+# Dependencies (deps) -- injected at runtime
 # ---------------------------------------------------------------------------
 @dataclass
 class Deps:
-    search: SearchClient  # 키·http를 품은 검색 클라이언트 (Serper 등)
+    search: SearchClient  # search client holding the key + http (e.g. Serper)
 
 
 # ---------------------------------------------------------------------------
@@ -52,7 +54,7 @@ sector_agent = Agent(
     os.environ.get("LLM_MODEL", "anthropic:claude-sonnet-4-6"),
     deps_type=Deps,
     output_type=SectorAnalysis,
-    retries=2,  # output_validator(ModelRetry) 재조사 예산 — 형식·품질 검증 실패 시 재시도
+    retries=2,  # output_validator(ModelRetry) budget -- retry on format/quality failure
     system_prompt=(
         "You are an equity sector analyst. "
         "FIRST, always call the `get_today` tool to anchor on today's real date "
@@ -71,10 +73,10 @@ sector_agent = Agent(
 
 @sector_agent.tool_plain
 def get_today() -> str:
-    """오늘 날짜·현재 분기·조사 권장 기간(현재 분기 ±4Q)을 반환.
+    """Return today's date, current quarter, and the recommended research window (current quarter +/-4Q).
 
-    agent가 '최신' 데이터를 정확한 기준으로 찾도록 실제 현재 날짜를 알려준다.
-    deps가 필요 없으므로 tool_plain(컨텍스트 없는 도구)으로 등록한다.
+    Gives the agent the real current date so it anchors "most recent" data correctly.
+    Registered as tool_plain (context-free) since it needs no deps.
     """
     now = datetime.now(timezone.utc)
     q = (now.month - 1) // 3 + 1
@@ -95,22 +97,23 @@ def get_today() -> str:
 
 @sector_agent.tool
 async def web_search(ctx: RunContext[Deps], query: str) -> str:
-    """웹 검색(정제된 결과). 섹터 시장규모·CAGR·경쟁사 조사에 사용.
+    """Web search (cleaned results). Used to research sector market size / CAGR / competitors.
 
-    실제 검색·정제는 deps의 SearchClient가 담당한다(Serper 등 백엔드 교체 가능).
+    The actual search + cleaning is handled by the deps SearchClient (Serper etc, swappable).
     """
     return await ctx.deps.search.search(query)
 
 
 # ---------------------------------------------------------------------------
-# 출력 검증 — @output_validator 2개. 정의 순서대로 실행되며 둘 다 통과해야 한다.
-# 실패 시 ModelRetry를 던지면 PydanticAI가 피드백을 모델에 주고 자동 재조사(retries=2).
-# format이 먼저 돌아서, 형식이 틀리면 비싼 judge(LLM) 호출을 건너뛴다.
-# 참고: https://ai.pydantic.dev/output/  (output validators & ModelRetry)
+# Output validation -- two @output_validators. They run in definition order and both
+# must pass. On failure, raising ModelRetry feeds it back to the model and PydanticAI
+# re-analyzes automatically (retries=2). check_format runs first, so a format failure
+# skips the expensive judge (LLM) call.
+# Ref: https://ai.pydantic.dev/output/  (output validators & ModelRetry)
 # ---------------------------------------------------------------------------
 @sector_agent.output_validator
 def check_format(data: SectorAnalysis) -> SectorAnalysis:
-    """1층 — 결정적 형식·근거 체크 (계산만 → 동기)."""
+    """Layer 1 -- deterministic format/evidence checks (pure compute -> sync)."""
     problems: list[str] = []
     if len(data.sources) < 3:
         problems.append("Provide at least 3 source URLs.")
@@ -123,8 +126,8 @@ def check_format(data: SectorAnalysis) -> SectorAnalysis:
     return data
 
 
-# 섹터 분석 전용 rubric — 도메인 기준은 호출자가 소유한다(judge_agent는 범용).
-# 출력에서 검증 가능한 '측정 가능한 criteria'로 작성(업계 표준).
+# Sector-specific rubric -- domain criteria are owned by the caller (judge_agent is generic).
+# Written as measurable criteria checkable from the output (industry best practice).
 SECTOR_RUBRIC = (
     "1) The `sources` list contains URLs from reputable DOMAINS (e.g. gartner.com, "
     "reuters.com, bloomberg.com, sec.gov, *.gov, or established research/news/company-IR "
@@ -140,8 +143,8 @@ SECTOR_RUBRIC = (
 
 @sector_agent.output_validator
 async def check_quality(ctx: RunContext[Deps], data: SectorAnalysis) -> SectorAnalysis:
-    """2층 — 범용 judge에 섹터 rubric을 넘겨 주관 품질 판정 (judge LLM 호출 → 비동기)."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")  # 날짜 기준은 rubric에 채움
+    """Layer 2 -- pass the sector rubric to the generic judge for subjective quality (LLM call -> async)."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")  # fill today's date into the rubric
     verdict = await judge(SECTOR_RUBRIC.format(today=today), data, usage=ctx.usage)
     if not verdict.passed:
         raise ModelRetry("Improve quality:\n- " + "\n- ".join(verdict.issues))
@@ -149,7 +152,7 @@ async def check_quality(ctx: RunContext[Deps], data: SectorAnalysis) -> SectorAn
 
 
 # ---------------------------------------------------------------------------
-# 실행
+# Run
 # ---------------------------------------------------------------------------
 async def main() -> None:
     async with httpx.AsyncClient() as client:

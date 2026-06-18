@@ -1,8 +1,8 @@
-"""웹 검색 클라이언트 — 검색 백엔드 어댑터.
+"""Web search client -- search backend adapter.
 
-`SearchClient`(Protocol)로 인터페이스(포트)를 정의하고, `SerperClient`가 구현한다.
-나중에 Brave/Tavily/MCP 등으로 바꾸려면 같은 Protocol을 따르는 구현만 추가하면 된다.
-(agent 코드는 SearchClient 타입에만 의존하므로 바뀌지 않는다.)
+`SearchClient` (Protocol) defines the interface (port); `SerperClient` implements it.
+To switch to Brave/Tavily/MCP later, just add another implementation of the same
+Protocol (agent code only depends on the SearchClient type, so it doesn't change).
 """
 
 from __future__ import annotations
@@ -13,21 +13,22 @@ import httpx
 
 
 class SearchClient(Protocol):
-    """검색 백엔드 인터페이스. query를 받아 '정제된' 텍스트 결과를 반환한다."""
+    """Search backend interface. Takes a query, returns 'cleaned' text results."""
 
     async def search(self, query: str) -> str: ...
 
 
 class SerperClient:
-    """Serper(google.serper.dev) 기반 SearchClient 구현.
+    """SearchClient implementation backed by Serper (google.serper.dev).
 
-    API 키와 http client를 생성 시점에 한 번 주입받아 캡슐화한다(호출부는 query만).
+    The API key and http client are injected once at construction and encapsulated
+    (callers pass only the query).
     """
 
     def __init__(self, api_key: str, http: httpx.AsyncClient, *, num: int = 8):
         self._key = api_key
         self._http = http
-        self._num = num  # 검색당 organic 결과 개수
+        self._num = num  # organic results per search
 
     async def search(self, query: str) -> str:
         resp = await self._http.post(
@@ -41,10 +42,10 @@ class SerperClient:
 
     @staticmethod
     def _clean(data: dict) -> str:
-        """organic 결과의 제목·날짜·스니펫·링크만 추려 토큰을 절약한다.
+        """Keep only title/date/snippet/link of organic results to save tokens.
 
-        raw JSON의 knowledgeGraph·relatedSearches·sitelinks 등 노이즈는 버린다.
-        answerBox(직접 답)가 있으면 맨 앞에 붙인다.
+        Drops raw-JSON noise like knowledgeGraph / relatedSearches / sitelinks.
+        Prepends the answerBox (direct answer) if present.
         """
         lines: list[str] = []
         answer = data.get("answerBox") or {}

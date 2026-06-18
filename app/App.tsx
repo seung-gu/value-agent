@@ -8,9 +8,9 @@ import {
   View,
 } from 'react-native';
 
-// 백엔드 API 주소.
-// - 웹/시뮬레이터: localhost OK
-// - 실제 모바일 기기: PC의 LAN IP로 바꿔야 함 (예: http://192.168.0.x:8000)
+// Backend API address.
+// - web / simulator: localhost is fine
+// - real mobile device: use the PC's LAN IP (e.g. http://192.168.0.x:8000)
 const API = 'http://127.0.0.1:8000';
 
 type Company = { name: string; reason: string };
@@ -31,12 +31,12 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<SectorAnalysis | null>(null);
 
-  // 시작 시 섹터 목록 로드 (GET /sectors)
+  // Load the sector list on mount (GET /sectors)
   useEffect(() => {
     fetch(`${API}/sectors`)
       .then((r) => r.json())
       .then(setSectors)
-      .catch(() => setError('백엔드(/sectors)에 연결 못 함 — 서버가 떠 있나요?'));
+      .catch(() => setError("Can't reach backend (/sectors) — is the server running?"));
   }, []);
 
   async function analyze(sector: string) {
@@ -52,7 +52,7 @@ export default function App() {
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       setResult((await r.json()) as SectorAnalysis);
     } catch (e) {
-      setError(`분석 실패: ${String(e)}`);
+      setError(`Analysis failed: ${String(e)}`);
     } finally {
       setLoading(false);
     }
@@ -60,7 +60,7 @@ export default function App() {
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
-      <Text style={styles.title}>Value Agent — 섹터 분석</Text>
+      <Text style={styles.title}>Value Agent — Sector Analysis</Text>
 
       <View style={styles.chips}>
         {sectors.map((s) => (
@@ -78,7 +78,7 @@ export default function App() {
       {loading && (
         <View style={styles.center}>
           <ActivityIndicator size="large" />
-          <Text style={styles.muted}>분석 중… (30초~1분)</Text>
+          <Text style={styles.muted}>Analyzing… (30s–1min)</Text>
         </View>
       )}
 
@@ -88,26 +88,26 @@ export default function App() {
         <View style={styles.card}>
           <Text style={styles.h2}>{result.sector}</Text>
           <Text style={styles.score}>
-            잠재성 {result.potential_score}/100 · 신뢰도 {result.confidence}
+            Potential {result.potential_score}/100 · Confidence {result.confidence}
           </Text>
-          <Text style={styles.row}>📊 시장규모: {result.market_size}</Text>
+          <Text style={styles.row}>📊 Market size: {result.market_size}</Text>
           <Text style={styles.row}>📈 CAGR: {result.cagr}</Text>
 
-          <Text style={styles.h3}>경쟁 기업</Text>
+          <Text style={styles.h3}>Competitors</Text>
           {result.top_companies.map((c, i) => (
             <Text key={i} style={styles.row}>
               • {c.name} — {c.reason}
             </Text>
           ))}
 
-          <Text style={styles.h3}>성장 동인</Text>
+          <Text style={styles.h3}>Growth drivers</Text>
           {result.key_drivers.map((d, i) => (
             <Text key={i} style={styles.row}>
               • {d}
             </Text>
           ))}
 
-          <Text style={styles.h3}>출처 ({result.sources.length})</Text>
+          <Text style={styles.h3}>Sources ({result.sources.length})</Text>
           {result.sources.slice(0, 5).map((u, i) => (
             <Text key={i} style={styles.src}>
               {u}

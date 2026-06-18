@@ -1,0 +1,14 @@
+# FE is deployed separately (not needed in the image)
+app/
+
+# local / secret / dev-only (don't put in the image)
+.venv/
+.git/
+.gitignore
+.env
+.env.*
+__pycache__/
+*.pyc
+*.md
+.claude/
+eval_sectors.py

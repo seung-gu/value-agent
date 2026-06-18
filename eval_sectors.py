@@ -1,11 +1,11 @@
-"""sector_agent 평가 셋업 (개발 안전망 / 회귀 테스트).
+"""sector_agent evaluation setup (dev safety net / regression tests).
 
-골든 섹터셋에 대해 sector_agent를 돌리고 다층으로 평가한다:
-- 커스텀(deterministic, 공짜): sources·top_companies·score 충족 여부
-- HasMatchingSpan: get_today·web_search를 실제로 호출했는지 (logfire span 기반)
-- LLMJudge: 출처 신뢰도 / 데이터 최신성 (차원별로 분리)
+Runs sector_agent over a golden sector set and evaluates it in layers:
+- custom (deterministic, free): whether sources / top_companies / score are satisfied
+- HasMatchingSpan: whether get_today / web_search were actually called (logfire spans)
+- LLMJudge: source reputation / data recency (split per dimension)
 
-실행:
+Run:
     uv run eval_sectors.py
 """
 
@@ -31,7 +31,7 @@ JUDGE_MODEL = "anthropic:claude-sonnet-4-6"
 
 
 # ---------------------------------------------------------------------------
-# Task — 평가 대상: 섹터명을 받아 SectorAnalysis를 반환
+# Task -- the thing under eval: takes a sector name, returns SectorAnalysis
 # ---------------------------------------------------------------------------
 async def analyze(sector: str) -> SectorAnalysis:
     async with httpx.AsyncClient() as client:
@@ -41,7 +41,7 @@ async def analyze(sector: str) -> SectorAnalysis:
 
 
 # ---------------------------------------------------------------------------
-# 커스텀 evaluator — 근거가 충분한지 (LLM 없이, 공짜·결정적)
+# Custom evaluator -- whether evidence is sufficient (no LLM, free & deterministic)
 # ---------------------------------------------------------------------------
 @dataclass
 class HasEvidence(Evaluator):
@@ -57,7 +57,7 @@ class HasEvidence(Evaluator):
 
 
 # ---------------------------------------------------------------------------
-# 골든 데이터셋
+# Golden dataset
 # ---------------------------------------------------------------------------
 dataset = Dataset(
     name="sector_analysis",
@@ -69,7 +69,7 @@ dataset = Dataset(
     evaluators=[
         IsInstance(type_name="SectorAnalysis"),
         HasEvidence(),
-        # 행동 검증: 날짜를 먼저 인지하고 검색을 실제로 했는가 (logfire span)
+        # Behavior check: did it anchor the date first and actually search (logfire span)
         HasMatchingSpan(
             query={"has_attributes": {"gen_ai.tool.name": "get_today"}},
             evaluation_name="used_get_today",
@@ -78,7 +78,7 @@ dataset = Dataset(
             query={"has_attributes": {"gen_ai.tool.name": "web_search"}},
             evaluation_name="used_web_search",
         ),
-        # 품질 검증: 차원별로 분리된 LLMJudge
+        # Quality check: LLMJudge split per dimension
         LLMJudge(
             rubric=(
                 "The `sources` are from reputable outlets (e.g. Gartner, Reuters, SEC, "
