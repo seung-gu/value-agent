@@ -31,7 +31,9 @@ load_dotenv()  # load .env before judge_agent is created (independent of import 
 
 class Verdict(BaseModel):
     passed: bool
-    issues: list[str]  # fixes to apply when failed (used as re-analysis feedback)
+    # Blocking problems only -- non-empty if and only if passed is false.
+    # Used as re-analysis feedback by the caller.
+    issues: list[str]
 
 
 # Generic verifier, not tied to any rubric. The rubric is passed per call as the user message.
@@ -51,7 +53,11 @@ judge_agent = Agent(
         "- Judge ONLY what is checkable from the output itself: source-domain reputation, "
         "internal consistency, completeness, and format.\n"
         "Set passed=true if the output reasonably satisfies the rubric; set passed=false "
-        "only for concrete, checkable problems, and list actionable fixes in `issues`."
+        "only for concrete, checkable problems.\n"
+        "`issues` are BLOCKING problems and MUST stay consistent with `passed`: if "
+        "passed=true, `issues` MUST be empty; if passed=false, list the blocking issues "
+        "as actionable fixes. Do NOT put optional or nice-to-have suggestions in `issues` "
+        "-- if a point is not serious enough to fail the output, leave it out."
     ),
     model_settings={"temperature": 0.0},  # consistent verdicts
 )
@@ -59,9 +65,14 @@ judge_agent = Agent(
 
 @judge_agent.output_validator
 def _sane(v: Verdict) -> Verdict:
-    """If failed but no reason is given, the re-analysis feedback would be empty, so make the judge retry."""
+    """Keep passed and issues consistent -- issues are blocking, so non-empty IFF passed is false."""
     if not v.passed and not v.issues:
-        raise ModelRetry("If passed is false, list at least one concrete issue.")
+        raise ModelRetry("If passed is false, list at least one concrete blocking issue.")
+    if v.passed and v.issues:
+        raise ModelRetry(
+            "Inconsistent: you listed issues but set passed=true. `issues` are blocking. "
+            "Either set passed=false (if they truly block), or remove them and pass."
+        )
     return v
 
 

@@ -147,7 +147,10 @@ async def check_quality(ctx: RunContext[Deps], data: SectorAnalysis) -> SectorAn
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")  # fill today's date into the rubric
     verdict = await judge(SECTOR_RUBRIC.format(today=today), data, usage=ctx.usage)
     if not verdict.passed:
-        raise ModelRetry("Improve quality:\n- " + "\n- ".join(verdict.issues))
+        raise ModelRetry(
+            "Your previous analysis was largely correct. Keep everything else identical "
+            "and fix ONLY these specific issues:\n- " + "\n- ".join(verdict.issues)
+        )
     return data
 
 
