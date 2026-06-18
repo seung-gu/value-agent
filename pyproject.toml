@@ -8,4 +8,6 @@ dependencies = [
     "pydantic-ai",
     "httpx",
     "python-dotenv",
+    "fastapi>=0.137.1",
+    "uvicorn[standard]>=0.49.0",
 ]

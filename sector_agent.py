@@ -126,18 +126,23 @@ def check_format(data: SectorAnalysis) -> SectorAnalysis:
 # 섹터 분석 전용 rubric — 도메인 기준은 호출자가 소유한다(judge_agent는 범용).
 # 출력에서 검증 가능한 '측정 가능한 criteria'로 작성(업계 표준).
 SECTOR_RUBRIC = (
-    "1) Sources are from reputable outlets (Gartner, Reuters, SEC, Bloomberg, "
-    "established research firms, or company IR pages) and the market_size/cagr "
-    "figures are attributable to them — not vague or invented.\n"
-    "2) Figures reflect recent data (roughly current quarter +/- 4 quarters), "
-    "not stale numbers several years old."
+    "1) The `sources` list contains URLs from reputable DOMAINS (e.g. gartner.com, "
+    "reuters.com, bloomberg.com, sec.gov, *.gov, or established research/news/company-IR "
+    "sites). Judge by domain reputation only — do not try to verify the exact URL.\n"
+    "2) market_size and cagr each include a figure with a year/period, and "
+    "top_companies and key_drivers are non-empty.\n"
+    "3) The figures reference recent periods. Today is {today}; treat dates on or "
+    "before today as valid current/past data (do NOT treat current-year dates as "
+    "future or fabricated). Flag only data that is obviously years-old stale. "
+    "Trust cited reputable sources for the values."
 )
 
 
 @sector_agent.output_validator
 async def check_quality(ctx: RunContext[Deps], data: SectorAnalysis) -> SectorAnalysis:
     """2층 — 범용 judge에 섹터 rubric을 넘겨 주관 품질 판정 (judge LLM 호출 → 비동기)."""
-    verdict = await judge(SECTOR_RUBRIC, data, usage=ctx.usage)  # usage 전달 → 토큰 합산
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")  # 날짜 기준은 rubric에 채움
+    verdict = await judge(SECTOR_RUBRIC.format(today=today), data, usage=ctx.usage)
     if not verdict.passed:
         raise ModelRetry("Improve quality:\n- " + "\n- ".join(verdict.issues))
     return data

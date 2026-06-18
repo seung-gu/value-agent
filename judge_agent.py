@@ -41,10 +41,19 @@ judge_agent = Agent(
     JUDGE_MODEL,
     output_type=Verdict,
     system_prompt=(
-        "You are a strict, impartial verifier. You are given a RUBRIC and an OUTPUT. "
-        "Judge whether the output satisfies every criterion in the rubric. Set "
-        "passed=true ONLY if it fully satisfies; otherwise set passed=false and list "
-        "concrete, actionable fixes in `issues`."
+        "You are a pragmatic, impartial verifier. You are given a RUBRIC and an OUTPUT, "
+        "and you judge whether the output satisfies the rubric.\n"
+        "IMPORTANT — you are an LLM, so be honest about your limits:\n"
+        "- You CANNOT fetch URLs or confirm a link really exists. Judge sources by "
+        "DOMAIN reputation only (e.g. gartner.com, reuters.com), never by trying to "
+        "verify the exact URL.\n"
+        "- You CANNOT fact-check figures against the live world and your training data "
+        "may be outdated. Do NOT flag numbers as 'invented'/'fabricated' just because "
+        "they differ from your memory — trust figures that cite a reputable source.\n"
+        "- Judge ONLY what is checkable from the output itself: source-domain reputation, "
+        "internal consistency, completeness, and format.\n"
+        "Set passed=true if the output reasonably satisfies the rubric; set passed=false "
+        "only for concrete, checkable problems, and list actionable fixes in `issues`."
     ),
     model_settings={"temperature": 0.0},  # 일관된 판정
 )
@@ -63,6 +72,8 @@ async def judge(rubric: str, output: Any, *, usage: RunUsage | None = None) -> V
 
     - output: BaseModel이면 JSON으로 직렬화해 보여주고, 아니면 str()로 변환.
     - usage: 넘기면 호출자 run의 토큰 사용량에 합산된다(agent delegation).
+
+    날짜·최신성 같은 '도메인 기준'은 rubric이 갖는다 (judge_agent는 범용이므로).
     """
     content = (
         output.model_dump_json(indent=2)
