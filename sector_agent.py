@@ -62,8 +62,12 @@ sector_agent = Agent(
         "research to the window it reports (current quarter ±4 quarters). "
         "Then, given a US GICS sector, use the `web_search` tool to research its "
         "growth potential: market size, CAGR, key growth drivers, and the most "
-        "competitive companies in it. When you search, include the relevant year/"
-        "quarter (e.g. '2026', 'Q2 2026') so results stay current. "
+        "competitive companies in it. For EACH competitive company, find a concrete "
+        "source-backed figure (market share %, revenue, growth rate, capex, etc.) and "
+        "put it in that company's `evidence` field; if no figure is available from your "
+        "sources, say so explicitly in `evidence` -- never invent a number. When you "
+        "search, include the relevant year/quarter (e.g. '2026', 'Q2 2026') so results "
+        "stay current. "
         "Gather additional useful metrics beyond CAGR/market size when relevant. "
         "Always record the source URLs you relied on. Be conservative with "
         "potential_score and confidence when data is thin."
@@ -119,6 +123,11 @@ def check_format(data: SectorAnalysis) -> SectorAnalysis:
         problems.append("Provide at least 3 source URLs.")
     if not data.top_companies:
         problems.append("List at least one competitive company.")
+    elif any(not c.evidence.strip() for c in data.top_companies):
+        problems.append(
+            "Each company in top_companies must have a non-empty `evidence` "
+            "(a source-backed figure, or an explicit note that none was available)."
+        )
     if not data.market_size.strip() or not data.cagr.strip():
         problems.append("market_size and cagr must not be empty.")
     if problems:
@@ -132,8 +141,11 @@ SECTOR_RUBRIC = (
     "1) The `sources` list contains URLs from reputable DOMAINS (e.g. gartner.com, "
     "reuters.com, bloomberg.com, sec.gov, *.gov, or established research/news/company-IR "
     "sites). Judge by domain reputation only — do not try to verify the exact URL.\n"
-    "2) market_size and cagr each include a figure with a year/period, and "
-    "top_companies and key_drivers are non-empty.\n"
+    "2) market_size and cagr each include a figure with a year/period; key_drivers is "
+    "non-empty; and EACH company in top_companies has an `evidence` field with a "
+    "concrete, source-backed figure (market share %, revenue, growth rate, capex, etc.). "
+    "A company whose evidence is only vague qualitative prose with NO number is a FAIL, "
+    "unless it explicitly states no figure was available from sources.\n"
     "3) The figures reference recent periods. Today is {today}; treat dates on or "
     "before today as valid current/past data (do NOT treat current-year dates as "
     "future or fabricated). Flag only data that is obviously years-old stale. "

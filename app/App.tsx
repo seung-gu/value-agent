@@ -14,7 +14,7 @@ import {
 //   Expo inlines EXPO_PUBLIC_* env vars into the bundle at build time.
 const API = process.env.EXPO_PUBLIC_API_URL ?? 'http://127.0.0.1:8000';
 
-type Company = { name: string; reason: string };
+type Company = { name: string; reason: string; evidence: string };
 type SectorAnalysis = {
   sector: string;
   market_size: string;
@@ -96,9 +96,10 @@ export default function App() {
 
           <Text style={styles.h3}>Competitors</Text>
           {result.top_companies.map((c, i) => (
-            <Text key={i} style={styles.row}>
-              • {c.name} — {c.reason}
-            </Text>
+            <View key={i} style={styles.company}>
+              <Text style={styles.row}>• {c.name} — {c.reason}</Text>
+              <Text style={styles.evidence}>📊 {c.evidence}</Text>
+            </View>
           ))}
 
           <Text style={styles.h3}>Growth drivers</Text>
@@ -145,5 +146,7 @@ const styles = StyleSheet.create({
   score: { fontSize: 14, color: '#225', marginBottom: 8 },
   h3: { fontSize: 15, fontWeight: '600', marginTop: 12 },
   row: { fontSize: 13, lineHeight: 19 },
+  company: { marginTop: 6 },
+  evidence: { fontSize: 12, color: '#447', marginLeft: 14, lineHeight: 17 },
   src: { fontSize: 11, color: '#558' },
 });

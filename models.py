@@ -12,6 +12,9 @@ from pydantic import BaseModel, Field
 class CompetitorCompany(BaseModel):
     name: str
     reason: str  # why it is competitive in this sector
+    # Quantitative backing from sources: market share %, revenue, growth rate, capex, etc.
+    # If no figure is available from sources, state that explicitly -- never invent numbers.
+    evidence: str
 
 
 class SectorAnalysis(BaseModel):
