@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "app",
-    "slug": "app",
+    "name": "Value Agent",
+    "slug": "value-agent",
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
@@ -9,6 +9,7 @@
       "supportsTablet": true
     },
     "android": {
+      "package": "com.seunggu.valueagent",
       "predictiveBackGestureEnabled": false
     },
     "web": {}
