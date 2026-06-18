@@ -8,10 +8,11 @@ import {
   View,
 } from 'react-native';
 
-// Backend API address.
-// - web / simulator: localhost is fine
-// - real mobile device: use the PC's LAN IP (e.g. http://192.168.0.x:8000)
-const API = 'http://127.0.0.1:8000';
+// Backend API base URL.
+// - local dev: falls back to localhost
+// - deployed (Railway/Vercel): set EXPO_PUBLIC_API_URL to the backend's public URL.
+//   Expo inlines EXPO_PUBLIC_* env vars into the bundle at build time.
+const API = process.env.EXPO_PUBLIC_API_URL ?? 'http://127.0.0.1:8000';
 
 type Company = { name: string; reason: string };
 type SectorAnalysis = {
