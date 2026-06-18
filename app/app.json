@@ -12,6 +12,11 @@
       "package": "com.seunggu.valueagent",
       "predictiveBackGestureEnabled": false
     },
-    "web": {}
+    "web": {},
+    "extra": {
+      "eas": {
+        "projectId": "9238e276-49c8-4d96-ab6d-f9923235aa07"
+      }
+    }
   }
 }
