@@ -1,14 +1,13 @@
-"""
-Sector analysis agent (top-down entry point).
+"""Sector agent (stage 1 of the orchestration).
 
-Takes one US GICS sector, researches its growth/potential via web search (Serper),
-and returns a SectorAnalysis. Also discovers competitive companies.
+Given a US GICS sector, it identifies the sector's top ~5 SUB-INDUSTRIES and each one's
+weight (share of the sector), plus high-level sector metrics. It does NOT fill company
+shares or portfolios -- the orchestrator fans out to industry_agent (per-sub-industry
+shares) and company_agent (per-company portfolio) afterwards.
 
-Two-layer validation (both run in @output_validator -> on failure ModelRetry makes
-PydanticAI re-analyze automatically):
-- Layer 1 (format/evidence): deterministic checks (source count, companies, required fields).
-- Layer 2 (subjective quality): pass the sector rubric to the generic judge_agent to
-  assess source reputation / recency.
+Two-layer validation (@output_validator -> ModelRetry, retries=2):
+- Layer 1 (format): ~3-7 sub-industries, weights sum ~100, metrics present.
+- Layer 2 (quality): sub-industry rubric via the generic judge.
 
 Run:
     uv run sector_agent.py
@@ -25,63 +24,56 @@ import httpx
 import logfire
 from dotenv import load_dotenv
 from pydantic_ai import Agent, ModelRetry, RunContext
+from pydantic_ai.usage import RunUsage
 
 from judge_agent import judge
 from models import SectorAnalysis
 from search import SearchClient, SerperClient
 
-load_dotenv()  # load LLM_MODEL, ANTHROPIC_API_KEY, SERPER_API_KEY from .env
+load_dotenv()  # load LLM_MODEL / keys from .env
 
-# Observability: trace agent / LLM / tool calls with logfire.
-# send_to_logfire="if-token-present" -> local-only without a token, cloud with one.
+# Observability: trace agent / LLM / tool calls with logfire (configured once here;
+# the other agents are instrumented globally by this same call).
 logfire.configure(send_to_logfire="if-token-present")
-logfire.instrument_pydantic_ai()  # instrument every agent run
-logfire.instrument_httpx()         # also trace Serper calls
+logfire.instrument_pydantic_ai()
+logfire.instrument_httpx()
 
 
-# ---------------------------------------------------------------------------
-# Dependencies (deps) -- injected at runtime
-# ---------------------------------------------------------------------------
 @dataclass
 class Deps:
     search: SearchClient  # search client holding the key + http (e.g. Serper)
 
 
-# ---------------------------------------------------------------------------
-# agent
-# ---------------------------------------------------------------------------
 sector_agent = Agent(
-    os.environ.get("LLM_MODEL", "openai:gpt-5"),
+    os.environ.get("LLM_MODEL", "openai:gpt-5-mini"),
     deps_type=Deps,
     output_type=SectorAnalysis,
-    retries=2,  # output_validator(ModelRetry) budget -- retry on format/quality failure
+    retries=2,
     system_prompt=(
-        "You are an equity sector analyst. "
-        "FIRST, always call the `get_today` tool to anchor on today's real date "
-        "and current quarter. Prioritize the MOST RECENT data, and restrict your "
-        "research to the window it reports (current quarter ±4 quarters). "
-        "Then, given a US GICS sector, use the `web_search` tool to research its "
-        "growth potential: market size, CAGR, key growth drivers, and the most "
-        "competitive companies in it. For EACH competitive company, find a concrete "
-        "source-backed figure (market share %, revenue, growth rate, capex, etc.) and "
-        "put it in that company's `evidence` field; if no figure is available from your "
-        "sources, say so explicitly in `evidence` -- never invent a number. When you "
-        "search, include the relevant year/quarter (e.g. '2026', 'Q2 2026') so results "
-        "stay current. "
-        "Gather additional useful metrics beyond CAGR/market size when relevant. "
-        "Always record the source URLs you relied on. Be conservative with "
-        "potential_score and confidence when data is thin."
+        "You are an equity sector analyst. FIRST call the `get_today` tool to anchor on "
+        "today's real date and quarter; prioritize the MOST RECENT data. Then, given a US "
+        "GICS sector, use `web_search` to research MARKET-RESEARCH / INDUSTRY reports (IDC, "
+        "Gartner, Statista, Grand View Research, Mordor, Precedence, etc.) and do TWO things:\n"
+        "1) Fill the sector-level metrics: market_size and cagr (each a figure with a "
+        "year/period), key_drivers (what is driving the growth), and a conservative "
+        "potential_score/confidence.\n"
+        "2) Identify the MAJOR SUB-INDUSTRIES the same reports highlight for this sector -- "
+        "especially the ones DRIVING the growth (e.g. for Information Technology: Cloud "
+        "Infrastructure, Semiconductors, AI/Software...). For each, set `name` and, ONLY if "
+        "a report gives it, `market_size` (otherwise leave it empty -- do NOT force a "
+        "number). Do NOT compute artificial sector weights, and do NOT use ETF factsheets "
+        "-- use market-research / industry sources.\n"
+        "Leave every sub-industry's `companies` EMPTY and leave `company_portfolios` EMPTY "
+        "-- later stages fill those. Keep searches FOCUSED: a single market report covering "
+        "the sector usually lists its growth AND its sub-industries together, so a few "
+        "searches is plenty. Always record the source URLs you relied on."
     ),
 )
 
 
 @sector_agent.tool_plain
 def get_today() -> str:
-    """Return today's date, current quarter, and the recommended research window (current quarter +/-4Q).
-
-    Gives the agent the real current date so it anchors "most recent" data correctly.
-    Registered as tool_plain (context-free) since it needs no deps.
-    """
+    """Return today's date, current quarter, and the recommended research window (current quarter +/-4Q)."""
     now = datetime.now(timezone.utc)
     q = (now.month - 1) // 3 + 1
 
@@ -101,62 +93,43 @@ def get_today() -> str:
 
 @sector_agent.tool
 async def web_search(ctx: RunContext[Deps], query: str) -> str:
-    """Web search (cleaned results). Used to research sector market size / CAGR / competitors.
-
-    The actual search + cleaning is handled by the deps SearchClient (Serper etc, swappable).
-    """
+    """Web search (cleaned results). Used to research sub-industries / weights / metrics."""
     return await ctx.deps.search.search(query)
 
 
-# ---------------------------------------------------------------------------
-# Output validation -- two @output_validators. They run in definition order and both
-# must pass. On failure, raising ModelRetry feeds it back to the model and PydanticAI
-# re-analyzes automatically (retries=2). check_format runs first, so a format failure
-# skips the expensive judge (LLM) call.
-# Ref: https://ai.pydantic.dev/output/  (output validators & ModelRetry)
-# ---------------------------------------------------------------------------
-@sector_agent.output_validator
-def check_format(data: SectorAnalysis) -> SectorAnalysis:
-    """Layer 1 -- deterministic format/evidence checks (pure compute -> sync)."""
-    problems: list[str] = []
-    if len(data.sources) < 3:
-        problems.append("Provide at least 3 source URLs.")
-    if not data.top_companies:
-        problems.append("List at least one competitive company.")
-    elif any(not c.evidence.strip() for c in data.top_companies):
-        problems.append(
-            "Each company in top_companies must have a non-empty `evidence` "
-            "(a source-backed figure, or an explicit note that none was available)."
-        )
-    if not data.market_size.strip() or not data.cagr.strip():
-        problems.append("market_size and cagr must not be empty.")
-    if problems:
-        raise ModelRetry(" ".join(problems))
-    return data
-
-
-# Sector-specific rubric -- domain criteria are owned by the caller (judge_agent is generic).
-# Written as measurable criteria checkable from the output (industry best practice).
+# Sector-specific rubric for the generic judge.
 SECTOR_RUBRIC = (
-    "1) The `sources` list contains URLs from reputable DOMAINS (e.g. gartner.com, "
-    "reuters.com, bloomberg.com, sec.gov, *.gov, or established research/news/company-IR "
-    "sites). Judge by domain reputation only — do not try to verify the exact URL.\n"
-    "2) market_size and cagr each include a figure with a year/period; key_drivers is "
-    "non-empty; and EACH company in top_companies has an `evidence` field with a "
-    "concrete, source-backed figure (market share %, revenue, growth rate, capex, etc.). "
-    "A company whose evidence is only vague qualitative prose with NO number is a FAIL, "
-    "unless it explicitly states no figure was available from sources.\n"
-    "3) The figures reference recent periods. Today is {today}; treat dates on or "
-    "before today as valid current/past data (do NOT treat current-year dates as "
-    "future or fabricated). Flag only data that is obviously years-old stale. "
+    "1) `sub_industries` lists ~3-7 real, MAJOR sub-industries that reputable market-research "
+    "sources actually highlight for this sector (each with a name; market_size optional). "
+    "They must be industry sub-segments, NOT ETF holdings. Judge by source-domain reputation "
+    "only.\n"
+    "2) market_size and cagr each include a figure with a year/period, and key_drivers is "
+    "non-empty.\n"
+    "3) Figures reference recent periods. Today is {today}; treat dates on or before today "
+    "as valid current/past data (do NOT treat current-year dates as future/fabricated). "
     "Trust cited reputable sources for the values."
 )
 
 
 @sector_agent.output_validator
+def check_format(data: SectorAnalysis) -> SectorAnalysis:
+    """Layer 1 -- deterministic format checks (pure compute -> sync)."""
+    problems: list[str] = []
+    if not 3 <= len(data.sub_industries) <= 7:
+        problems.append("Identify between 3 and 7 major sub-industries.")
+    if not data.market_size.strip() or not data.cagr.strip():
+        problems.append("market_size and cagr must not be empty.")
+    if len(data.sources) < 2:
+        problems.append("Provide at least 2 source URLs.")
+    if problems:
+        raise ModelRetry(" ".join(problems))
+    return data
+
+
+@sector_agent.output_validator
 async def check_quality(ctx: RunContext[Deps], data: SectorAnalysis) -> SectorAnalysis:
-    """Layer 2 -- pass the sector rubric to the generic judge for subjective quality (LLM call -> async)."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")  # fill today's date into the rubric
+    """Layer 2 -- pass the sector rubric to the generic judge (LLM call -> async)."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     verdict = await judge(SECTOR_RUBRIC.format(today=today), data, usage=ctx.usage)
     if not verdict.passed:
         raise ModelRetry(
@@ -166,17 +139,21 @@ async def check_quality(ctx: RunContext[Deps], data: SectorAnalysis) -> SectorAn
     return data
 
 
-# ---------------------------------------------------------------------------
-# Run
-# ---------------------------------------------------------------------------
+async def identify_sub_industries(
+    sector: str, *, search: SearchClient, usage: RunUsage | None = None
+) -> SectorAnalysis:
+    """Stage 1 -- identify the sector's sub-industries + weights + metrics (companies left empty)."""
+    result = await sector_agent.run(
+        f"Analyze the {sector} sector.", deps=Deps(search=search), usage=usage
+    )
+    return result.output
+
+
 async def main() -> None:
     async with httpx.AsyncClient() as client:
         deps = Deps(search=SerperClient(os.environ["SERPER_API_KEY"], client))
-        result = await sector_agent.run(
-            "Analyze the Information Technology sector.", deps=deps
-        )
+        result = await sector_agent.run("Analyze the Information Technology sector.", deps=deps)
         print(result.output)
-        print(result.usage)
 
 
 if __name__ == "__main__":

@@ -48,5 +48,32 @@
 3. **agent는 자율 판단·도구가 필요할 때만** — 단발 작업은 tool / LLM 게이트. (LLM 호출 ≠ agent)
 4. 데이터 도구(MCP)는 공유 가능하게 프로젝트 밖 독립 위치, agent 로직은 프로젝트 안.
 
+## 구현 흐름 v1 — 프로그래밍 오케스트레이션 + 점진적 채우기
+
+초기 "사회자 멀티턴" 대신, 결정적 코드 오케스트레이션으로 단순화 (LLM hand-off 아님).
+
+```
+1단계  POST /analyze {sector}   ── 큰 틀만, 얕고 빠르게
+  sector_agent      → 시장조사 리포트(IDC·Gartner·Statista)에서
+                       섹터 CAGR·규모 + 주요 세부산업(성장 견인) + (있으면) 시장규모
+    └─ industry_agent ×N (병렬) → 각 세부산업의 회사 점유율 (Synergy·IDC 등)
+  ※ company는 1단계에서 안 돌림. 빈 점유율은 그대로 둔다.
+
+2단계  POST /refine ...          ── 사용자가 지목한 곳만 깊게
+  refine_sub_industry(name) → 빈 세부산업 점유율 채움 (industry_agent 1개)
+  refine_company(name)      → 그 회사 포트폴리오 (company_agent 1개)
+```
+
+### 점진적 채우기(progressive refinement) 원칙
+- **한 번에 완벽한 답은 불가능**을 전제. 1단계는 "큰 방향"만, **빈 곳은 그대로 둔다**.
+- 사용자가 관심 있는 곳만 2단계(interaction)로 채운다 (human-in-the-loop).
+- 효과: ① LLM이 "다 채워와"로 **검색 폭주**하는 걸 차단 ② 사용자 관심부에만 비용.
+- 특히 **company는 1단계 제외** → 회사 클릭 시 on-demand 1건만 (10개 동시 폭주 방지).
+
+### 검색 가드레일 (실측 교훈)
+- 각 agent run에 PydanticAI 기본 **request_limit=50** 유지 (폭주 차단). 줄이면 정상 작업도 막힘.
+- agent prompt: **권위 출처(시장조사 기관) 우선**, 못 찾으면 **빈값**(가짜보다 빈 게 낫다), **ETF factsheet 금지**(펀드 구성 ≠ 시장 규모).
+- usage는 agent별 독립(공유 X — 공유하면 누적이 한도에 걸린다).
+
 ## 미정
 - 라운드 종료 조건(충족 판정 + max-turn 카운터), 사회자 vs 종합 agent 경계, blackboard 도입 여부, 코드 시작점(기업지표 vs 섹터 agent).

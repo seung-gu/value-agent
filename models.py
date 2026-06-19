@@ -1,7 +1,11 @@
-"""Shared data models -- imported by several modules (sector_agent, judge, eval).
+"""Shared data models -- imported by the agents, the orchestrator, and the API.
 
-Kept in a separate file to avoid circular imports
-(sector_agent and judge both import SectorAnalysis from here).
+Kept in a separate file to avoid circular imports.
+
+Data shapes for the UI:
+- SubIndustry (name + optional market_size) -> the sector's major sub-industries
+- SubIndustry.companies     -> per-sub-industry market-share pie (who leads each market)
+- CompanyPortfolio.portfolio-> per-company portfolio pie (how a company's revenue splits)
 """
 
 from __future__ import annotations
@@ -9,21 +13,42 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 
-class CompetitorCompany(BaseModel):
+class Segment(BaseModel):
+    """One slice of a company's business portfolio (portfolio pie)."""
+    label: str          # e.g. "Cloud", "iPhone", "Services"
+    percentage: float   # 0-100, source-backed
+
+
+class CompanyShare(BaseModel):
+    """One company's market share within a sub-industry (market-share pie)."""
+    company: str
+    share: float          # % within the sub-industry, source-backed
+    evidence: str = ""    # short source-backed note (why/how this share); empty if none
+
+
+class SubIndustry(BaseModel):
+    """One major sub-industry of the sector (e.g. 'Cloud Infrastructure')."""
     name: str
-    reason: str  # why it is competitive in this sector
-    # Quantitative backing from sources: market share %, revenue, growth rate, capex, etc.
-    # If no figure is available from sources, state that explicitly -- never invent numbers.
-    evidence: str
+    market_size: str = ""  # market size if a report gives it, else empty (no forced weight)
+    companies: list[CompanyShare] = Field(default_factory=list)  # market-share pie
+    sources: list[str] = Field(default_factory=list)
+
+
+class CompanyPortfolio(BaseModel):
+    """One company's business portfolio (portfolio pie). Output of company_agent."""
+    name: str
+    portfolio: list[Segment] = Field(default_factory=list)
+    sources: list[str] = Field(default_factory=list)
 
 
 class SectorAnalysis(BaseModel):
-    sector: str                       # GICS sector name
-    market_size: str                  # value + year (e.g. "$1.77B (2026)")
-    cagr: str                         # % + period (e.g. "23.8% (2026-2032)")
-    potential_score: float = Field(ge=0, le=100)  # score for ranking/comparing sectors
-    top_companies: list[CompetitorCompany]        # discovered competitive companies
-    key_drivers: list[str] = Field(default_factory=list)        # growth drivers
-    extra_metrics: dict[str, str] = Field(default_factory=dict)  # extra metrics the agent gathered itself
-    sources: list[str] = Field(default_factory=list)            # source URLs (anti-hallucination)
+    """Final merged result for one sector."""
+    sector: str
+    market_size: str
+    cagr: str
+    potential_score: float = Field(ge=0, le=100)
+    sub_industries: list[SubIndustry] = Field(default_factory=list)          # ~5 sub-industries
+    company_portfolios: list[CompanyPortfolio] = Field(default_factory=list)  # top companies
+    key_drivers: list[str] = Field(default_factory=list)
+    sources: list[str] = Field(default_factory=list)
     confidence: float = Field(ge=0, le=1, default=0.5)

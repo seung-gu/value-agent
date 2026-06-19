@@ -38,7 +38,7 @@ class Verdict(BaseModel):
 
 # Generic verifier, not tied to any rubric. The rubric is passed per call as the user message.
 judge_agent = Agent(
-    os.getenv("JUDGE_MODEL", "openai:gpt-5-mini"),
+    os.getenv("JUDGE_MODEL", "openai:gpt-5"),
     output_type=Verdict,
     system_prompt=(
         "You are a pragmatic, impartial verifier. You are given a RUBRIC and an OUTPUT, "

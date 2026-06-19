@@ -31,13 +31,20 @@ class SerperClient:
         self._num = num  # organic results per search
 
     async def search(self, query: str) -> str:
-        resp = await self._http.post(
-            "https://google.serper.dev/search",
-            headers={"X-API-KEY": self._key},
-            json={"q": query, "num": self._num},
-            timeout=30.0,
-        )
-        resp.raise_for_status()
+        q = (query or "").strip()
+        if not q:
+            return "(empty query -- nothing searched)"
+        try:
+            resp = await self._http.post(
+                "https://google.serper.dev/search",
+                headers={"X-API-KEY": self._key},
+                json={"q": q, "num": self._num},
+                timeout=30.0,
+            )
+            resp.raise_for_status()
+        except httpx.HTTPError as e:
+            # One failed search must not kill the pipeline -- report it back to the agent.
+            return f"(search failed: {e})"
         return self._clean(resp.json())
 
     @staticmethod
