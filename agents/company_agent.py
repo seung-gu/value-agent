@@ -23,11 +23,12 @@ from dotenv import load_dotenv
 from pydantic_ai import Agent, ModelRetry, RunContext
 from pydantic_ai.usage import RunUsage
 
+from agents.deps import Deps
 from agents.judge_agent import judge
 from domain import CompanyPortfolio
 from ports.search_client import SearchClient
-from agents.deps import Deps
-from tools.web import web_search
+from tools import get_today
+from tools.web import web_read, web_search
 
 load_dotenv()  # load COMPANY_MODEL / LLM_MODEL / keys from .env
 
@@ -41,10 +42,12 @@ company_agent = Agent(
     output_type=CompanyPortfolio,
     retries=2,
     system_prompt=(
-        "You research ONE company's business portfolio: how its revenue breaks down by "
-        "business segment (e.g. Cloud, Advertising, Devices). Use the `web_search` tool "
-        "to find the latest segment breakdown from the company's 10-K / annual report / "
-        "IR page or other reputable sources. Express each segment as a percentage (0-100). "
+        "FIRST call `get_today` to anchor on today's date; search for CURRENT data, NOT your "
+        "training-cutoff year. You research ONE company's business portfolio: how its revenue "
+        "breaks down by business segment (e.g. Cloud, Advertising, Devices). Use `web_search` "
+        "to FIND the latest segment breakdown (the company's 10-K / annual report / IR page or "
+        "other reputable sources), then use `web_read` on the best URL to READ that page and "
+        "pull the real figures. Express each segment as a percentage (0-100). "
         "The percentages MUST sum to ~100; if the named segments don't cover everything, "
         "add an 'Others' segment for the remainder. Use ONLY source-backed figures -- "
         "NEVER invent or estimate percentages. If no reliable breakdown is available, "
@@ -56,9 +59,11 @@ company_agent = Agent(
 )
 
 
-# Shared web_search tool (tools/web.py), delegating to the SearchClient adapter in Deps.
-# (No web_read / get_today here -- company_agent keeps its current minimal toolset.)
+# Shared agent tools (tools/): get_today anchors on the date; web_search/web_read delegate
+# to the SearchClient adapter in Deps.
+company_agent.tool_plain(get_today)
 company_agent.tool(web_search)
+company_agent.tool(web_read)
 
 
 # Portfolio rubric -- domain criteria for the generic judge (sums/sourcing are checkable).
