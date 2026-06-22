@@ -10,33 +10,29 @@ Two-layer validation (both @output_validator -> ModelRetry on failure, retries=2
 - Layer 2 (quality): pass the portfolio rubric to the generic judge.
 
 Run:
-    uv run company_agent.py
+    uv run python -m agents.company_agent
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
-from dataclasses import dataclass
 
 import httpx
 from dotenv import load_dotenv
 from pydantic_ai import Agent, ModelRetry, RunContext
 from pydantic_ai.usage import RunUsage
 
-from judge_agent import judge
-from models import CompanyPortfolio
-from search import SearchClient, SerperClient
+from agents.judge_agent import judge
+from domain import CompanyPortfolio
+from ports.search_client import SearchClient
+from agents.deps import Deps
+from tools.web import web_search
 
 load_dotenv()  # load COMPANY_MODEL / LLM_MODEL / keys from .env
 
 # Default to the same model as the sector agent; overridable via COMPANY_MODEL.
 COMPANY_MODEL = os.environ.get("COMPANY_MODEL", os.environ.get("LLM_MODEL", "openai:gpt-5-mini"))
-
-
-@dataclass
-class Deps:
-    search: SearchClient  # search client holding the key + http (e.g. Serper)
 
 
 company_agent = Agent(
@@ -60,10 +56,9 @@ company_agent = Agent(
 )
 
 
-@company_agent.tool
-async def web_search(ctx: RunContext[Deps], query: str) -> str:
-    """Web search (cleaned results) to research the company's segment revenue breakdown."""
-    return await ctx.deps.search.search(query)
+# Shared web_search tool (tools/web.py), delegating to the SearchClient adapter in Deps.
+# (No web_read / get_today here -- company_agent keeps its current minimal toolset.)
+company_agent.tool(web_search)
 
 
 # Portfolio rubric -- domain criteria for the generic judge (sums/sourcing are checkable).
@@ -128,6 +123,8 @@ async def research_company(
 
 
 async def main() -> None:
+    from adapters.serper.search_client import SerperClient
+
     async with httpx.AsyncClient() as client:
         search = SerperClient(os.environ["SERPER_API_KEY"], client)
         result = await research_company("Microsoft", search=search)

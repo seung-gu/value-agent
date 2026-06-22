@@ -1,7 +1,7 @@
 """sector_agent evaluation setup (dev safety net / regression tests).
 
 Runs sector_agent over a golden sector set and evaluates it in layers:
-- custom (deterministic, free): whether sources / top_companies / score are satisfied
+- custom (deterministic, free): whether sources / sub_industries / score are satisfied
 - HasMatchingSpan: whether get_today / web_search were actually called (logfire spans)
 - LLMJudge: source reputation / data recency (split per dimension)
 
@@ -24,8 +24,10 @@ from pydantic_evals.evaluators import (
     LLMJudge,
 )
 
-from search import SerperClient
-from sector_agent import Deps, SectorAnalysis, sector_agent
+from adapters.serper.search_client import SerperClient
+from agents.deps import Deps
+from agents.sector_agent import sector_agent
+from domain import SectorAnalysis
 
 JUDGE_MODEL = "anthropic:claude-sonnet-4-6"
 
@@ -51,7 +53,7 @@ class HasEvidence(Evaluator):
         out: SectorAnalysis = ctx.output
         return {
             "has_sources": len(out.sources) >= self.min_sources,
-            "has_companies": len(out.top_companies) >= 1,
+            "has_sub_industries": len(out.sub_industries) >= 1,
             "score_in_range": 0.0 <= out.potential_score <= 100.0,
         }
 

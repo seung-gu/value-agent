@@ -11,3 +11,6 @@ wheels/
 
 # Environment variables (secrets)
 .env
+
+# local cache (sqlite + raw blobs) -- runtime, not source
+data/

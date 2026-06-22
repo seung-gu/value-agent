@@ -1,49 +1,69 @@
-"""Orchestrator -- two-stage progressive refinement for one sector.
+"""Orchestrator (application layer) -- two-stage progressive refinement for one sector.
 
 Stage 1 (analyze_sector): the big picture, shallow and fast.
   sector_agent          -> sub-industries (name + optional market_size) + sector metrics
-    └─ fan-out: industry_agent per sub-industry -> company market shares
+    └─ fan-out: sub_industry_agent per sub-industry -> company market shares
   Company portfolios are NOT fetched here -- empty spots are left as-is.
 
 Stage 2 (refine_*): fill one spot the user asked about, on demand.
-  refine_sub_industry(name) -> (re)research one sub-industry's company shares
-  refine_company(name)      -> research one company's portfolio
 
-Why: a single pass can't fill everything well, and forcing it makes agents loop on
-data they can't find (search blow-up). So stage 1 stays shallow; the user drives
-stage 2 only where they care. Company is excluded from stage 1 precisely because
-fanning out to ~10 companies at once is what blew up the search count.
-
-Programmatic orchestration (deterministic control flow), not LLM-driven hand-off.
-No shared usage: PydanticAI's default request_limit=50 is per-run, so sharing one
-usage would make the whole fan-out hit the limit together. Fan-outs are graceful --
-one failing agent yields an empty result instead of killing the run.
+Depends on PORTS (the repository interfaces + SearchClient), never on adapters -- the api
+composition root injects the concrete sqlite repos / Serper client. Each function does
+read-before / write-after against its repository; `refresh=True` skips the read (re-research)
+but still writes. Fan-outs are graceful: one failing agent yields an empty result.
 """
 
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 
-from company_agent import research_company
-from industry_agent import research_sub_industry
-from models import CompanyPortfolio, SectorAnalysis, SubIndustry
-from search import SearchClient
+from agents.company_agent import research_company
+from agents.sub_industry_agent import research_sub_industry
+from agents.sector_agent import identify_sub_industries
+from domain.company import CompanyPortfolio
+from domain.sector import SectorAnalysis
+from domain.sub_industry import SubIndustry
+from ports.search_client import SearchClient
+from ports.repository import Repository
 
-from sector_agent import identify_sub_industries
+
+def current_period() -> str:
+    """Today's freshness bucket, e.g. '2026-Q2'. Used as the `period` key for current data."""
+    now = datetime.now(timezone.utc)
+    return f"{now.year}-Q{(now.month - 1) // 3 + 1}"
 
 
-async def _safe_sub_industry(name: str, *, search: SearchClient) -> SubIndustry:
-    """research_sub_industry, but never raise -- return an empty SubIndustry on failure."""
+async def _safe_sub_industry(
+    name: str, *, search: SearchClient, repo: Repository[SubIndustry], refresh: bool = False
+) -> SubIndustry:
+    """Read-before/write-after one sub-industry's shares; never raise (empty on failure)."""
     try:
-        return await research_sub_industry(name, search=search)
+        period = current_period()
+        if not refresh:
+            hit = await repo.get(name, period)
+            if hit is not None:
+                return hit
+        result = await research_sub_industry(name, search=search)
+        await repo.save(result, period)
+        return result
     except Exception:
         return SubIndustry(name=name)
 
 
-async def _safe_portfolio(name: str, *, search: SearchClient) -> CompanyPortfolio:
-    """research_company, but never raise -- return an empty CompanyPortfolio on failure."""
+async def _safe_portfolio(
+    name: str, *, search: SearchClient, repo: Repository[CompanyPortfolio], refresh: bool = False
+) -> CompanyPortfolio:
+    """Read-before/write-after one company's portfolio; never raise (empty on failure)."""
     try:
-        return await research_company(name, search=search)
+        period = current_period()
+        if not refresh:
+            hit = await repo.get(name, period)
+            if hit is not None:
+                return hit
+        result = await research_company(name, search=search)
+        await repo.save(result, period)
+        return result
     except Exception:
         return CompanyPortfolio(name=name)
 
@@ -51,15 +71,29 @@ async def _safe_portfolio(name: str, *, search: SearchClient) -> CompanyPortfoli
 # ---------------------------------------------------------------------------
 # Stage 1 -- the big picture (sector + sub-industry shares). Shallow & fast.
 # ---------------------------------------------------------------------------
-async def analyze_sector(sector: str, *, search: SearchClient) -> SectorAnalysis:
+async def analyze_sector(
+    sector: str,
+    *,
+    search: SearchClient,
+    sectors: Repository[SectorAnalysis],
+    sub_industries: Repository[SubIndustry],
+    refresh: bool = False,
+) -> SectorAnalysis:
     """Sector metrics + sub-industries + their company shares. Company portfolios left empty."""
-    base = await identify_sub_industries(sector, search=search)
+    period = current_period()
+    base = None if refresh else await sectors.get(sector, period)
+    if base is None:
+        base = await identify_sub_industries(sector, search=search)
+        await sectors.save(base, period)
 
     # Fan-out: per-sub-industry company shares (parallel, graceful)
     filled = await asyncio.gather(
-        *[_safe_sub_industry(sub.name, search=search) for sub in base.sub_industries]
+        *[
+            _safe_sub_industry(sub.name, search=search, repo=sub_industries, refresh=refresh)
+            for sub in base.sub_industries
+        ]
     )
-    # industry_agent fills companies but not market_size -- carry it over from stage 1
+    # sub_industry_agent fills companies but not market_size -- carry it over from stage 1
     for original, researched in zip(base.sub_industries, filled):
         researched.market_size = original.market_size
 
@@ -79,11 +113,15 @@ async def analyze_sector(sector: str, *, search: SearchClient) -> SectorAnalysis
 # ---------------------------------------------------------------------------
 # Stage 2 -- refine one spot on demand (driven by the user / FE).
 # ---------------------------------------------------------------------------
-async def refine_sub_industry(name: str, *, search: SearchClient) -> SubIndustry:
-    """(Re)research one sub-industry's company shares -- e.g. an empty one the user clicked."""
-    return await _safe_sub_industry(name, search=search)
+async def refine_sub_industry(
+    name: str, *, search: SearchClient, repo: Repository[SubIndustry], refresh: bool = False
+) -> SubIndustry:
+    """(Re)research one sub-industry's company shares -- refresh=True bypasses the cache read."""
+    return await _safe_sub_industry(name, search=search, repo=repo, refresh=refresh)
 
 
-async def refine_company(name: str, *, search: SearchClient) -> CompanyPortfolio:
-    """Research one company's business portfolio -- e.g. a company the user clicked."""
-    return await _safe_portfolio(name, search=search)
+async def refine_company(
+    name: str, *, search: SearchClient, repo: Repository[CompanyPortfolio], refresh: bool = False
+) -> CompanyPortfolio:
+    """Research one company's business portfolio -- refresh=True bypasses the cache read."""
+    return await _safe_portfolio(name, search=search, repo=repo, refresh=refresh)

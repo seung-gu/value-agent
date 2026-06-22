@@ -2,7 +2,7 @@
 
 Given a US GICS sector, it identifies the sector's top ~5 SUB-INDUSTRIES and each one's
 weight (share of the sector), plus high-level sector metrics. It does NOT fill company
-shares or portfolios -- the orchestrator fans out to industry_agent (per-sub-industry
+shares or portfolios -- the orchestrator fans out to sub_industry_agent (per-sub-industry
 shares) and company_agent (per-company portfolio) afterwards.
 
 Two-layer validation (@output_validator -> ModelRetry, retries=2):
@@ -10,14 +10,13 @@ Two-layer validation (@output_validator -> ModelRetry, retries=2):
 - Layer 2 (quality): sub-industry rubric via the generic judge.
 
 Run:
-    uv run sector_agent.py
+    uv run python -m agents.sector_agent
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
-from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import httpx
@@ -26,9 +25,12 @@ from dotenv import load_dotenv
 from pydantic_ai import Agent, ModelRetry, RunContext
 from pydantic_ai.usage import RunUsage
 
-from judge_agent import judge
-from models import SectorAnalysis
-from search import SearchClient, SerperClient
+from agents.judge_agent import judge
+from domain import SectorAnalysis
+from ports.search_client import SearchClient
+from tools import get_today
+from agents.deps import Deps
+from tools.web import web_read, web_search
 
 load_dotenv()  # load LLM_MODEL / keys from .env
 
@@ -37,11 +39,6 @@ load_dotenv()  # load LLM_MODEL / keys from .env
 logfire.configure(send_to_logfire="if-token-present")
 logfire.instrument_pydantic_ai()
 logfire.instrument_httpx()
-
-
-@dataclass
-class Deps:
-    search: SearchClient  # search client holding the key + http (e.g. Serper)
 
 
 sector_agent = Agent(
@@ -64,37 +61,20 @@ sector_agent = Agent(
         "number). Do NOT compute artificial sector weights, and do NOT use ETF factsheets "
         "-- use market-research / industry sources.\n"
         "Leave every sub-industry's `companies` EMPTY and leave `company_portfolios` EMPTY "
-        "-- later stages fill those. Keep searches FOCUSED: a single market report covering "
-        "the sector usually lists its growth AND its sub-industries together, so a few "
-        "searches is plenty. Always record the source URLs you relied on."
+        "-- later stages fill those.\n"
+        "WORKFLOW: use `web_search` to FIND a relevant market report, then use `web_read` "
+        "on the best URL to READ that page. Search snippets do NOT contain the full figures, "
+        "so READ the actual report rather than re-searching. One or two good reads beat a "
+        "dozen searches. Always record the source URLs you relied on."
     ),
 )
 
 
-@sector_agent.tool_plain
-def get_today() -> str:
-    """Return today's date, current quarter, and the recommended research window (current quarter +/-4Q)."""
-    now = datetime.now(timezone.utc)
-    q = (now.month - 1) // 3 + 1
-
-    def shift_quarter(year: int, quarter: int, delta: int) -> tuple[int, int]:
-        idx = year * 4 + (quarter - 1) + delta
-        return idx // 4, idx % 4 + 1
-
-    start_y, start_q = shift_quarter(now.year, q, -4)
-    end_y, end_q = shift_quarter(now.year, q, 4)
-    return (
-        f"Today is {now:%Y-%m-%d}, which is Q{q} {now.year}. "
-        f"Prioritize the most recent data. "
-        f"Research window: Q{start_q} {start_y} to Q{end_q} {end_y} "
-        f"(current quarter +/-4 quarters)."
-    )
-
-
-@sector_agent.tool
-async def web_search(ctx: RunContext[Deps], query: str) -> str:
-    """Web search (cleaned results). Used to research sub-industries / weights / metrics."""
-    return await ctx.deps.search.search(query)
+# Shared agent tools (tools/): get_today anchors on the real date; web_search/web_read
+# delegate to the SearchClient adapter in Deps. Defined once in tools/, registered here.
+sector_agent.tool_plain(get_today)
+sector_agent.tool(web_search)
+sector_agent.tool(web_read)
 
 
 # Sector-specific rubric for the generic judge.
@@ -150,6 +130,8 @@ async def identify_sub_industries(
 
 
 async def main() -> None:
+    from adapters.serper.search_client import SerperClient
+
     async with httpx.AsyncClient() as client:
         deps = Deps(search=SerperClient(os.environ["SERPER_API_KEY"], client))
         result = await sector_agent.run("Analyze the Information Technology sector.", deps=deps)
