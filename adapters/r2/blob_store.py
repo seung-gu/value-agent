@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from urllib.parse import quote
 
 import httpx
+import logfire
 
 _ALGO = "AWS4-HMAC-SHA256"
 _SERVICE = "s3"
@@ -52,7 +53,7 @@ class R2BlobStore:
         self._host = f"{account_id}.r2.cloudflarestorage.com"
 
     @classmethod
-    def from_env(cls, http: httpx.AsyncClient) -> "R2BlobStore":
+    def from_env(cls, http: httpx.AsyncClient) -> R2BlobStore:
         """Build from R2_* env vars (set these locally in .env and on Railway)."""
         return cls(
             http,
@@ -109,7 +110,10 @@ class R2BlobStore:
 
     async def get(self, url: str) -> bytes | None:
         req_url, headers = self._sign("GET", self._object_key(url), b"")
-        resp = await self._http.get(req_url, headers=headers)
+        # R2 cache ops are infra plumbing -- don't trace them. A miss is a normal 404 that
+        # would otherwise show up as a red "error" span in logfire.
+        with logfire.suppress_instrumentation():
+            resp = await self._http.get(req_url, headers=headers)
         if resp.status_code == 404:
             return None  # not cached -> caller scrapes
         resp.raise_for_status()
@@ -117,5 +121,6 @@ class R2BlobStore:
 
     async def put(self, url: str, data: bytes) -> None:
         req_url, headers = self._sign("PUT", self._object_key(url), data)
-        resp = await self._http.put(req_url, headers=headers, content=data)
+        with logfire.suppress_instrumentation():
+            resp = await self._http.put(req_url, headers=headers, content=data)
         resp.raise_for_status()

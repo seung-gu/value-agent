@@ -26,7 +26,7 @@ class SerperClient(SearchClient):
         http: httpx.AsyncClient,
         *,
         num: int = 8,
-        blobs: "BlobStore | None" = None,
+        blobs: BlobStore | None = None,
     ):
         super().__init__(blobs=blobs)
         self._key = api_key

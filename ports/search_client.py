@@ -23,7 +23,7 @@ class SearchClient(ABC):
     Pass a `blobs` store to dedupe scrapes (Layer B); omit it for no caching.
     """
 
-    def __init__(self, *, blobs: "BlobStore | None" = None):
+    def __init__(self, *, blobs: BlobStore | None = None):
         self._blobs = blobs
 
     @abstractmethod
