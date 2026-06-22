@@ -12,3 +12,6 @@ __pycache__/
 *.md
 .claude/
 eval_sectors.py
+
+# runtime cache (sqlite + raw blobs) -- lives on the volume, not the image
+data/

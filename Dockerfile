@@ -8,7 +8,7 @@ COPY pyproject.toml uv.lock .python-version ./
 RUN uv sync --frozen --no-dev
 
 # 2) Copy backend source (FE/app, .env, etc. are excluded via .dockerignore).
-COPY *.py ./
+COPY . ./
 
 # Railway injects $PORT. Binding to 0.0.0.0 is required for external access.
 CMD uv run uvicorn api:app --host 0.0.0.0 --port ${PORT:-8000}
