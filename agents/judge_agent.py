@@ -6,7 +6,7 @@ output satisfies the rubric -> reusable. (This is the 'LLM-as-judge' layer that 
 after deterministic checks in the industry-standard 'tiered hybrid' verification.)
 
 Example:
-    from judge_agent import judge
+    from agents.judge_agent import judge
     verdict = await judge(SECTOR_RUBRIC, result, usage=ctx.usage)
     if not verdict.passed:
         raise ModelRetry("Improve:\\n- " + "\\n- ".join(verdict.issues))

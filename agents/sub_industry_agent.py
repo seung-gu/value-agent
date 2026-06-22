@@ -9,23 +9,26 @@ Two-layer validation (both @output_validator -> ModelRetry, retries=2):
 - Layer 2 (quality): pass the market-share rubric to the generic judge.
 
 Run:
-    uv run industry_agent.py
+    uv run python -m agents.sub_industry_agent
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
-from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import httpx
 from dotenv import load_dotenv
 from pydantic_ai import Agent, ModelRetry, RunContext
 from pydantic_ai.usage import RunUsage
 
-from judge_agent import judge
-from models import SubIndustry
-from search import SearchClient, SerperClient
+from agents.judge_agent import judge
+from domain import SubIndustry
+from ports.search_client import SearchClient
+from tools import get_today
+from agents.deps import Deps
+from tools.web import web_read, web_search
 
 load_dotenv()  # load INDUSTRY_MODEL / LLM_MODEL / keys from .env
 
@@ -33,34 +36,34 @@ load_dotenv()  # load INDUSTRY_MODEL / LLM_MODEL / keys from .env
 INDUSTRY_MODEL = os.environ.get("INDUSTRY_MODEL", os.environ.get("LLM_MODEL", "openai:gpt-5-mini"))
 
 
-@dataclass
-class Deps:
-    search: SearchClient  # search client holding the key + http (e.g. Serper)
-
-
-industry_agent = Agent(
+sub_industry_agent = Agent(
     INDUSTRY_MODEL,
     deps_type=Deps,
     output_type=SubIndustry,
     retries=2,
     system_prompt=(
         "You research ONE sub-industry / market and find the COMPANY MARKET SHARES in it. "
-        "Use the `web_search` tool to find the latest market-share data (e.g. IDC, Gartner, "
-        "Synergy Research, Statista, company filings) for this market. Put each leading "
-        "company's share as a percentage (0-100) in `companies`. The shares MUST sum to "
-        "~100; add an 'Others' company for the remainder. Use ONLY source-backed figures -- "
-        "NEVER invent shares. If no reliable share data exists, return an EMPTY `companies` "
-        "list (better empty than fabricated). For each company, put a short source-backed "
-        "note in its `evidence`. Always record the source URLs. Keep `name` exactly as "
-        "given and leave `weight` at 0 (the caller sets it)."
+        "FIRST call `get_today` to anchor on today's date, and search for CURRENT data -- "
+        "NOT your training-cutoff year (do not put 2023/2024 in queries unless asked).\n"
+        "WORKFLOW: use `web_search` to FIND a market-share report (IDC, Gartner, Synergy, "
+        "Counterpoint, TrendForce, Statista, company filings), then use `web_read` on the "
+        "best URL to READ that page -- search snippets do NOT contain the share table, so "
+        "READ the actual page and pull the numbers from it. One or two good reads beat many "
+        "searches. Put each leading company's share as a percentage (0-100) in `companies`. "
+        "The shares MUST sum to ~100; add an 'Others' company for the remainder. Use ONLY "
+        "source-backed figures from the page you read -- NEVER invent shares. If no reliable "
+        "share data exists, return an EMPTY `companies` list (better empty than fabricated). "
+        "For each company, put a short source-backed note in its `evidence`. Always record "
+        "the source URLs. Keep `name` exactly as given."
     ),
 )
 
 
-@industry_agent.tool
-async def web_search(ctx: RunContext[Deps], query: str) -> str:
-    """Web search (cleaned results) to research company market shares in this sub-industry."""
-    return await ctx.deps.search.search(query)
+# Shared agent tools (tools/): get_today anchors on the date; web_search/web_read delegate
+# to the SearchClient adapter in Deps.
+sub_industry_agent.tool_plain(get_today)
+sub_industry_agent.tool(web_search)
+sub_industry_agent.tool(web_read)
 
 
 # Market-share rubric -- domain criteria for the generic judge (sums/sourcing are checkable).
@@ -70,11 +73,13 @@ SHARE_RUBRIC = (
     "reputation only; do not verify exact URLs.\n"
     "2) The shares sum to roughly 100 (an 'Others' entry is fine). No invented numbers -- if "
     "share data is not sourced, `companies` should be empty instead.\n"
-    "3) `sources` are present whenever `companies` is non-empty."
+    "3) `sources` are present whenever `companies` is non-empty.\n"
+    "4) The data is RECENT -- today is {today}. Years-old shares (e.g. 2023 figures when "
+    "today is 2026) are STALE: FAIL them and require current-period data."
 )
 
 
-@industry_agent.output_validator
+@sub_industry_agent.output_validator
 def check_format(data: SubIndustry) -> SubIndustry:
     """Layer 1 -- deterministic checks on the shares (pure compute -> sync)."""
     problems: list[str] = []
@@ -95,12 +100,13 @@ def check_format(data: SubIndustry) -> SubIndustry:
     return data
 
 
-@industry_agent.output_validator
+@sub_industry_agent.output_validator
 async def check_quality(ctx: RunContext[Deps], data: SubIndustry) -> SubIndustry:
     """Layer 2 -- pass the market-share rubric to the generic judge (skip when empty)."""
     if not data.companies:
         return data  # an empty share list is acceptable (no source-backed data found)
-    verdict = await judge(SHARE_RUBRIC, data, usage=ctx.usage)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    verdict = await judge(SHARE_RUBRIC.format(today=today), data, usage=ctx.usage)
     if not verdict.passed:
         raise ModelRetry(
             "Your previous shares were largely correct. Keep everything else identical "
@@ -116,7 +122,7 @@ async def research_sub_industry(
 
     usage: pass the caller's RunUsage to aggregate token usage across the fan-out.
     """
-    result = await industry_agent.run(
+    result = await sub_industry_agent.run(
         f"Research the company market shares in the '{name}' market.",
         deps=Deps(search=search),
         usage=usage,
@@ -125,6 +131,8 @@ async def research_sub_industry(
 
 
 async def main() -> None:
+    from adapters.serper.search_client import SerperClient
+
     async with httpx.AsyncClient() as client:
         search = SerperClient(os.environ["SERPER_API_KEY"], client)
         result = await research_sub_industry("Cloud Infrastructure", search=search)
