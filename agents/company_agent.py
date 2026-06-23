@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from datetime import datetime, timezone
 
 import httpx
 from dotenv import load_dotenv
@@ -73,7 +74,9 @@ PORTFOLIO_RUBRIC = (
     "only; do not verify exact URLs.\n"
     "2) The segment percentages sum to roughly 100 (an 'Others' slice is fine). No invented "
     "numbers -- if the breakdown is not sourced, the portfolio should be empty instead.\n"
-    "3) `sources` are present whenever the portfolio is non-empty."
+    "3) `sources` are present whenever the portfolio is non-empty.\n"
+    "4) The data is RECENT -- today is {today}. Years-old figures (e.g. 2023 numbers when "
+    "today is 2026) are STALE: FAIL them and require current-period data."
 )
 
 
@@ -103,7 +106,8 @@ async def check_quality(ctx: RunContext[Deps], data: CompanyPortfolio) -> Compan
     """Layer 2 -- pass the portfolio rubric to the generic judge (skip when empty)."""
     if not data.portfolio:
         return data  # an empty portfolio is acceptable (no source-backed breakdown found)
-    verdict = await judge(PORTFOLIO_RUBRIC, data, usage=ctx.usage)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    verdict = await judge(PORTFOLIO_RUBRIC.format(today=today), data, usage=ctx.usage)
     if not verdict.passed:
         raise ModelRetry(
             "Your previous portfolio was largely correct. Keep everything else identical "

@@ -45,7 +45,8 @@ async def _safe_sub_industry(
             if hit is not None:
                 return hit
         result = await research_sub_industry(name, search=search)
-        await repo.save(result, period)
+        if result.companies:  # don't cache empty/failed research -> re-research next time
+            await repo.save(result, period)
         return result
     except Exception:
         return SubIndustry(name=name)
@@ -62,7 +63,8 @@ async def _safe_portfolio(
             if hit is not None:
                 return hit
         result = await research_company(name, search=search)
-        await repo.save(result, period)
+        if result.portfolio:  # don't cache empty/failed research -> re-research next time
+            await repo.save(result, period)
         return result
     except Exception:
         return CompanyPortfolio(name=name)
