@@ -75,5 +75,123 @@
 - agent prompt: **권위 출처(시장조사 기관) 우선**, 못 찾으면 **빈값**(가짜보다 빈 게 낫다), **ETF factsheet 금지**(펀드 구성 ≠ 시장 규모).
 - usage는 agent별 독립(공유 X — 공유하면 누적이 한도에 걸린다).
 
+## 데이터 모델 (DB 스키마)
+
+저장소는 **SQLite**(도커 내 파일, 별도 서버 없음 — Repository 포트로 추상화). GICS를 **`industry_group`(4자리, 25개)까지만** 고정 차용하고, 그 **아래 분석 단위(`sub_industry`)는 agent가 동적으로 식별**한다. GICS의 sub-industry(8자리, 163개)는 입도가 너무 거칠어 버린다 — 예: 반도체 전체가 `45301020` 한 칸이라 파운드리·메모리·팹리스·장비를 구분 못 함.
+
+### 두 가지 분리 원칙
+1. **고정 레퍼런스 ↔ 동적 데이터** — GICS 시드(read-only)와 agent가 write하는 분석 결과를 같은 테이블에 섞지 않는다.
+2. **정적 ↔ 시계열** — 분기마다 변하는 값은 `period`를 PK에 넣어 **행으로 누적**한다(스키마는 영구 고정, 새 분기는 `INSERT` 한 줄). 분기를 컬럼(`q1_pct`…)으로 늘리지 않는다(= ALTER 지옥, 안티패턴).
+
+→ 결과적으로 **정적 3 + 시계열 3 = 6 테이블**(대칭). MVP는 `company_portfolio` 없이 5개로 시작 가능하며, 파이차트가 필요해지면 1개만 추가하면 된다(`market_share`와 동일 구조라 trivial).
+
+### ER Diagram
+
+```mermaid
+erDiagram
+    gics_reference ||--o{ sub_industry        : "그룹 1:N 세부산업"
+    sub_industry   ||--o{ sub_industry_metric : "분기별 지표"
+    sub_industry   ||--o{ market_share        : "분기별 점유율"
+    company        ||--o{ market_share        : "분기별 점유율"
+    company        ||--o{ company_portfolio   : "분기별 포트폴리오"
+
+    gics_reference {
+        string group_code  PK "예: 4530"
+        string sector_code    "예: 45"
+        string sector_name
+        string group_name
+    }
+    sub_industry {
+        string sub_code    PK "예: 4530-01 (surrogate)"
+        string group_code  FK
+        string name           "예: Foundry"
+        string definition
+    }
+    company {
+        string company_code PK "예: C001 (surrogate)"
+        string name
+        string url
+    }
+    sub_industry_metric {
+        string sub_code PK "FK + period 복합 PK"
+        string period   PK
+        float  cagr
+        float  penetration
+        string source
+    }
+    market_share {
+        string sub_code     PK "FK"
+        string company_code PK "FK"
+        string period       PK
+        float  percentage
+        string source
+    }
+    company_portfolio {
+        string company_code PK "FK"
+        string segment      PK
+        string period       PK
+        float  percentage
+        string source
+    }
+```
+
+텍스트 관계도:
+
+```
+[정적 — period 없음]                 [시계열 — period로 분기 누적]
+
+gics_reference                       sub_industry_metric   (sub_code, period)
+   │ 1:N                          ┌─► market_share         (sub_code, company_code, period)
+sub_industry ──1:N──┬──1:N────────┘   company_portfolio    (company_code, segment, period)
+                    └──1:N────────► (sub_industry_metric)
+company ──1:N───────────────────────► market_share / company_portfolio
+```
+
+### 테이블 정의
+
+**정적 (period 없음 — 한번 정하면 유지, 마스터/레퍼런스)**
+
+| 테이블 | 키 | 컬럼 | 채우는 주체 |
+|------|----|------|-----------|
+| `gics_reference` | `group_code` PK | sector_code, sector_name, group_name | GICS 고정 시드(read-only) |
+| `sub_industry` | `sub_code` PK, `group_code` FK | name, definition | sub_industry_agent (ReAct + HITL) |
+| `company` | `company_code` PK | name, url | 점유율 조사 중 발견 시 등록 |
+
+**시계열 (period로 분기마다 행 누적 — 분석 결과)**
+
+| 테이블 | PK | 컬럼 | 의미 |
+|------|----|------|-----|
+| `sub_industry_metric` | (`sub_code`, `period`) | cagr, penetration | 세부산업의 분기별 지표 |
+| `market_share` | (`sub_code`, `company_code`, `period`) | percentage | 세부산업 내 회사별 점유율 |
+| `company_portfolio` | (`company_code`, `segment`, `period`) | percentage | 회사 매출의 사업부문별 비중 |
+
+> 시계열 3테이블은 각 수치의 출처 추적용 `source` 컬럼을 공통으로 포함한다(가짜 수치 방지 — 기존 설계 원칙 유지).
+
+### 시계열 = 분해(breakdown) 패턴
+
+`market_share`와 `company_portfolio`는 **구조가 동일**하다 — 둘 다 `(부모, 조각, period) → percentage`이고 분기마다 조각들의 합이 ~100%:
+
+```
+market_share      : sub_industry 를 → company들로 분해   (Foundry = TSMC 60% + Samsung 15% + …)
+company_portfolio : company 를      → segment들로 분해   (Microsoft = Cloud 40% + Office 30% + …)
+```
+
+저장은 **덮어쓰기가 아니라 누적**: 같은 `(sub_code, company_code)`라도 분기가 다르면 별개 행으로 공존 → 과거 추이가 자동 보존. 조회는 최신만 보려면 `WHERE period = '2026-Q2'`, 추이는 한 키로 `ORDER BY period`. 실제 저장값은 이름이 아니라 **surrogate code**이며 표시할 때 마스터 테이블과 조인한다.
+
+### 코드 구조 (포트 / 어댑터)
+
+테이블의 두 패턴이 Repository 포트에도 그대로 반영된다 (클린 아키텍처 — orchestrator는 포트에만 의존, sqlite 어댑터가 구현):
+
+| 포트 (`ports/repository.py`) | 메서드 | 어댑터 (`adapters/sqlite/repository.py`) |
+|---|---|---|
+| `StaticRepository[T]` | `upsert` · `get(code)` · `list(**where)` | `StaticTable` |
+| `TimeSeriesRepository[T]` | `replace(parent, period, rows)` · `get(parent, period)` · `history(parent)` | `TimeSeriesTable` |
+
+- **도메인 엔티티**: `domain/` (gics_reference · sub_industry+metric · company+portfolio · market_share)
+- **연결·DDL**: `adapters/sqlite/base.py` (6테이블, WAL + `foreign_keys=ON`)
+- **시드**: `adapters/sqlite/seed.py` (25 industry groups, idempotent upsert)
+- **조립**: `SqliteStorage` — `.gics .sub_industries .companies` (정적) / `.metrics .market_shares .portfolios` (시계열)
+- 시계열 저장은 덮어쓰기가 아니라 **`(parent, period)` 단위 원자적 교체**(재실행 idempotent). 조회는 최신=`get`, 추이=`history`.
+
 ## 미정
 - 라운드 종료 조건(충족 판정 + max-turn 카운터), 사회자 vs 종합 agent 경계, blackboard 도입 여부, 코드 시작점(기업지표 vs 섹터 agent).

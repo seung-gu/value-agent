@@ -1,85 +1,83 @@
-"""Shared SQLite plumbing for the per-domain repositories.
+"""SQLite plumbing -- shared connection + the 6-table schema (DDL).
 
-`SqliteTable` is a generic (entity, period) -> JSON store over ONE table; each repository
-wraps it and adds the domain typing (dump on save, validate on get). `open_connection`
-opens the shared db (one file, one connection) with the WAL/concurrency PRAGMAs and creates
-the per-domain tables.
+The 6 domain tables split into two shapes:
+- STATIC (gics_reference, sub_industry, company): code-keyed master rows, no period.
+- TIME-SERIES (sub_industry_metric, market_share, company_portfolio): `period` is part of
+  the PK, so rows accumulate one set per period (the schema never changes -- only INSERTs).
+
+DDL is explicit here (one CREATE per table -- the schemas genuinely differ); the generic
+CRUD lives in repository.py. Column names == pydantic field names, so the repos can map
+rows <-> models with model_dump/model_validate and no per-table SQL.
 """
 
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone
 from pathlib import Path
 
 import aiosqlite
 
-TABLES = ("sector", "sub_industry", "company")
+# Explicit per-table DDL. FKs document the 1:N / N:M wiring and guard integrity.
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS gics_reference (
+    group_code  TEXT PRIMARY KEY,        -- '4530'
+    sector_code TEXT NOT NULL,           -- '45'
+    sector_name TEXT NOT NULL,
+    group_name  TEXT NOT NULL
+);
 
+CREATE TABLE IF NOT EXISTS sub_industry (
+    sub_code   TEXT PRIMARY KEY,         -- surrogate '4530-01'
+    group_code TEXT NOT NULL REFERENCES gics_reference(group_code),
+    name       TEXT NOT NULL,
+    definition TEXT NOT NULL DEFAULT ''
+);
 
-def _normalize(entity: str) -> str:
-    """Canonicalize an entity key so trivial drift ('  Cloud  Infrastructure ') still hits.
+CREATE TABLE IF NOT EXISTS company (
+    company_code TEXT PRIMARY KEY,       -- surrogate 'C001'
+    name         TEXT NOT NULL,
+    url          TEXT NOT NULL DEFAULT ''
+);
 
-    A missed alias only costs a re-research (safe but leaky) -- never wrong data.
-    """
-    return " ".join(entity.lower().split())
+CREATE TABLE IF NOT EXISTS sub_industry_metric (
+    sub_code    TEXT NOT NULL REFERENCES sub_industry(sub_code),
+    period      TEXT NOT NULL,           -- '2026-Q2'
+    cagr        REAL,                    -- nullable (may be unknown)
+    penetration REAL,
+    source      TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (sub_code, period)
+);
 
+CREATE TABLE IF NOT EXISTS market_share (
+    sub_code     TEXT NOT NULL REFERENCES sub_industry(sub_code),
+    company_code TEXT NOT NULL REFERENCES company(company_code),
+    period       TEXT NOT NULL,
+    percentage   REAL NOT NULL,
+    source       TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (sub_code, company_code, period)
+);
 
-class SqliteTable:
-    """Generic (entity, period) -> dict store over one table. Repos wrap this and add typing."""
-
-    def __init__(self, conn: aiosqlite.Connection, table: str):
-        self._db = conn
-        self._table = table  # from the hardcoded TABLES tuple -- never user input
-
-    async def get(self, entity: str, period: str) -> dict | None:
-        cur = await self._db.execute(
-            f"SELECT value_json FROM {self._table} WHERE entity=? AND period=?",
-            (_normalize(entity), period),
-        )
-        row = await cur.fetchone()
-        return json.loads(row["value_json"]) if row else None
-
-    async def save(self, entity: str, period: str, value: dict) -> None:
-        await self._db.execute(
-            f"""
-            INSERT INTO {self._table} (entity, period, value_json, fetched_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(entity, period) DO UPDATE SET
-                value_json = excluded.value_json,
-                fetched_at = excluded.fetched_at
-            """,
-            (
-                _normalize(entity),
-                period,
-                json.dumps(value, ensure_ascii=False),
-                datetime.now(timezone.utc).isoformat(),
-            ),
-        )
-        await self._db.commit()
+CREATE TABLE IF NOT EXISTS company_portfolio (
+    company_code TEXT NOT NULL REFERENCES company(company_code),
+    period       TEXT NOT NULL,
+    segment      TEXT NOT NULL,
+    percentage   REAL NOT NULL,
+    source       TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (company_code, segment, period)
+);
+"""
 
 
 async def open_connection(db_path: str | Path) -> aiosqlite.Connection:
-    """Open the shared sqlite connection (WAL + busy_timeout) and create the per-domain tables."""
+    """Open the shared sqlite connection (WAL + FK + concurrency PRAGMAs) and create the tables."""
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = await aiosqlite.connect(str(db_path))
     conn.row_factory = aiosqlite.Row
     # WAL lets readers run during a write; busy_timeout serializes writers without SQLITE_BUSY;
-    # NORMAL trims fsync cost safely under WAL. Fan-out writes are tiny + serialized -> invisible.
+    # NORMAL trims fsync cost safely under WAL. foreign_keys enforces the REFERENCES above.
     await conn.execute("PRAGMA journal_mode=WAL")
     await conn.execute("PRAGMA busy_timeout=5000")
     await conn.execute("PRAGMA synchronous=NORMAL")
-    for table in TABLES:
-        await conn.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {table} (
-                entity     TEXT NOT NULL,    -- normalized entity key
-                period     TEXT NOT NULL,    -- freshness bucket, e.g. '2026-Q2'
-                value_json TEXT NOT NULL,    -- the domain entity, dumped
-                fetched_at TEXT NOT NULL,
-                PRIMARY KEY (entity, period)
-            )
-            """
-        )
+    await conn.execute("PRAGMA foreign_keys=ON")
+    await conn.executescript(_SCHEMA)
     await conn.commit()
     return conn

@@ -1,44 +1,65 @@
-"""SQLite adapters -- the 3 domain repositories (one generic SqliteRepository each) over a shared db.
+"""SQLite adapters -- the 6 domain repositories over one shared connection.
 
-`SqliteStorage.open(db_path)` opens the connection (+ tables) and exposes the repositories:
-`storage.sectors`, `storage.sub_industries`, `storage.companies`. Close once via `close()`.
+`SqliteStorage.open(db_path)` opens the connection (+ creates tables) and exposes:
+  static:      .gics  .sub_industries  .companies
+  time-series: .metrics  .market_shares  .portfolios
+Close once via `close()`. The (table, pk/parent) wiring is hardcoded here.
 """
 
 from __future__ import annotations
 
-from adapters.sqlite.base import SqliteTable, open_connection
-from adapters.sqlite.repository import SqliteRepository
-from domain.company import CompanyPortfolio
-from domain.sector import SectorAnalysis
-from domain.sub_industry import SubIndustry
-from ports.repository import Repository
+import aiosqlite
 
-__all__ = ["SqliteStorage", "SqliteRepository"]
+from adapters.sqlite.base import open_connection
+from adapters.sqlite.repository import StaticTable, TimeSeriesTable
+from domain import (
+    Company,
+    CompanyPortfolio,
+    GicsReference,
+    MarketShare,
+    SubIndustry,
+    SubIndustryMetric,
+)
+from ports.repository import StaticRepository, TimeSeriesRepository
+
+__all__ = ["SqliteStorage", "StaticTable", "TimeSeriesTable"]
 
 
 class SqliteStorage:
-    """Owns one sqlite connection and exposes the 3 domain repositories over it."""
+    """Owns one sqlite connection and exposes the 6 domain repositories over it."""
 
     def __init__(
         self,
-        conn,
-        sectors: Repository[SectorAnalysis],
-        sub_industries: Repository[SubIndustry],
-        companies: Repository[CompanyPortfolio],
+        conn: aiosqlite.Connection,
+        *,
+        gics: StaticRepository[GicsReference],
+        sub_industries: StaticRepository[SubIndustry],
+        companies: StaticRepository[Company],
+        metrics: TimeSeriesRepository[SubIndustryMetric],
+        market_shares: TimeSeriesRepository[MarketShare],
+        portfolios: TimeSeriesRepository[CompanyPortfolio],
     ):
         self._conn = conn
-        self.sectors = sectors
+        # static
+        self.gics = gics
         self.sub_industries = sub_industries
         self.companies = companies
+        # time-series
+        self.metrics = metrics
+        self.market_shares = market_shares
+        self.portfolios = portfolios
 
     @classmethod
-    async def open(cls, db_path: str = "data/cache.db") -> "SqliteStorage":
+    async def open(cls, db_path: str = "data/cache.db") -> SqliteStorage:
         conn = await open_connection(db_path)
         return cls(
             conn,
-            SqliteRepository(SqliteTable(conn, "sector"), SectorAnalysis, lambda s: s.sector),
-            SqliteRepository(SqliteTable(conn, "sub_industry"), SubIndustry, lambda s: s.name),
-            SqliteRepository(SqliteTable(conn, "company"), CompanyPortfolio, lambda c: c.name),
+            gics=StaticTable(conn, "gics_reference", GicsReference, "group_code"),
+            sub_industries=StaticTable(conn, "sub_industry", SubIndustry, "sub_code"),
+            companies=StaticTable(conn, "company", Company, "company_code"),
+            metrics=TimeSeriesTable(conn, "sub_industry_metric", SubIndustryMetric, "sub_code"),
+            market_shares=TimeSeriesTable(conn, "market_share", MarketShare, "sub_code"),
+            portfolios=TimeSeriesTable(conn, "company_portfolio", CompanyPortfolio, "company_code"),
         )
 
     async def close(self) -> None:

@@ -1,20 +1,28 @@
-"""Company domain -- a company's business portfolio (the portfolio pie)."""
+"""Company domain -- the static company master + its quarterly revenue breakdown.
+
+`Company` is the static master (name, url), identified by a surrogate code so it is stored
+once and referenced (not duplicated) by every market_share / portfolio row. `CompanyPortfolio`
+is one revenue segment for one period (time-series) -- the portfolio pie, accumulated per period.
+"""
 
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
 
-class Segment(BaseModel):
-    """One slice of a company's business portfolio."""
+class Company(BaseModel):
+    """A company -- static master, referenced by surrogate code."""
 
-    label: str          # e.g. "Cloud", "iPhone", "Services"
-    percentage: float   # 0-100, source-backed
+    company_code: str   # surrogate, e.g. "C001"
+    name: str
+    url: str = ""
 
 
 class CompanyPortfolio(BaseModel):
-    """One company's business portfolio (portfolio pie). Output of company_agent."""
+    """One revenue segment of a company for one period (time-series row of the portfolio pie)."""
 
-    name: str
-    portfolio: list[Segment] = Field(default_factory=list)
-    sources: list[str] = Field(default_factory=list)
+    company_code: str                        # FK -> Company.company_code
+    period: str                              # "2026-Q2"
+    segment: str                             # "Cloud", "iPhone", ...
+    percentage: float = Field(ge=0, le=100)  # % of company revenue
+    source: str = ""
