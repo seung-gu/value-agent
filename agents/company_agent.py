@@ -27,6 +27,7 @@ from pydantic_ai.usage import RunUsage
 
 from agents.deps import Deps
 from agents.judge_agent import judge
+from agents.source_guard import read_urls, unread_sources
 from ports.search_client import SearchClient
 from tools import get_today
 from tools.web import web_read, web_search
@@ -48,25 +49,38 @@ class PortfolioResult(BaseModel):
     """A company's revenue breakdown by segment (the segments sum to ~100)."""
 
     segments: list[SegmentFinding] = Field(default_factory=list)
+    as_of: str = ""  # fiscal period the figures are FROM, read off the filing (e.g. "FY2025")
 
 
 company_agent = Agent(
     COMPANY_MODEL,
     deps_type=Deps,
     output_type=PortfolioResult,
-    retries=2,
+    retries=4,
     system_prompt=(
-        "FIRST call `get_today` to anchor on today's date; search for CURRENT data, NOT your "
-        "training-cutoff year. You research ONE company's revenue breakdown by business segment "
-        "(e.g. Cloud, Advertising, Devices). Use `web_search` to FIND the latest segment "
-        "breakdown (the company's 10-K / annual report / IR page or other reputable sources), "
-        "then use `web_read` on the best URL to READ that page and pull the real figures. "
-        "Express each segment as a percentage (0-100) in `segments`. The percentages MUST sum "
-        "to ~100; if the named segments don't cover everything, add an 'Others' segment. Use "
-        "ONLY source-backed figures -- NEVER invent percentages. If no reliable breakdown is "
-        "available, return EMPTY `segments` (better empty than fabricated). IMPORTANT: spend at "
-        "most 2-3 searches -- if you can't find a source-backed split quickly, STOP and return "
-        "empty. Put each segment's source URL in `source`."
+        "You research ONE company's revenue breakdown by business segment (e.g. Cloud, "
+        "Advertising, Devices).\n"
+        "FIRST call `get_today` to anchor on today's date, then search for the MOST RECENT "
+        "breakdown available -- not your training-cutoff year.\n"
+        "WORKFLOW:\n"
+        "1) `web_search` to find the latest segment breakdown (the company's 10-K / annual "
+        "report / 10-Q / IR deck, or reputable coverage of it).\n"
+        "2) `web_read` the most promising result -- snippets rarely hold the segment table, "
+        "so READ the page and pull the real figures from it.\n"
+        "3) If that source is thin, incomplete, or stale, DO NOT settle: search again with "
+        "different terms (the fiscal year, 'segment revenue', '10-K') and `web_read` another "
+        "page.\n"
+        "COVERAGE: include every reported segment. Express each as a percentage (0-100) in "
+        "`segments`; they MUST sum to ~100 -- put any remainder in a single 'Others' segment.\n"
+        "RECENCY: set `as_of` to the fiscal period the figures come FROM (read it off the "
+        "filing), NOT today's date. Write it as a BARE period only -- exactly 'FY2024' or "
+        "'YYYY-Qn' (e.g. 'FY2025' or '2025-Q3'), with no extra words.\n"
+        "HONESTY: use ONLY source-backed figures. Each `source` MUST be the URL of a page "
+        "you ACTUALLY opened with web_read -- never cite an upstream link you only saw in "
+        "search results (it may be dead/paywalled), and never invent percentages. If the "
+        "page you read attributes the data to someone else, still cite the page you read. "
+        "Return an EMPTY `segments` list ONLY as a last resort, after genuinely trying "
+        "several sources and finding no reliable breakdown."
     ),
 )
 
@@ -80,13 +94,19 @@ company_agent.tool(web_read)
 
 # Portfolio rubric -- domain criteria for the generic judge (sums/sourcing are checkable).
 PORTFOLIO_RUBRIC = (
-    "1) Each `segments` entry has a label and a percentage attributable to a reputable source "
-    "(company 10-K/IR, Reuters, Bloomberg, etc.). Judge by source-domain reputation only.\n"
-    "2) The percentages sum to roughly 100 (an 'Others' slice is fine). No invented numbers -- "
-    "if the breakdown is not sourced, `segments` should be empty instead.\n"
-    "3) A `source` is present on each segment whenever `segments` is non-empty.\n"
-    "4) The data is RECENT -- today is {today}. Years-old figures (e.g. 2023 numbers when today "
-    "is 2026) are STALE: FAIL them and require current-period data."
+    "1) SOURCING: each `segments` entry has a label and a percentage attributable to a "
+    "reputable source (company 10-K/10-Q/IR, Reuters, Bloomberg, etc.). Judge by "
+    "source-domain reputation only.\n"
+    "2) SUM: the percentages sum to roughly 100 (an 'Others' slice is fine). No invented "
+    "numbers -- if the breakdown is not sourced, `segments` should be empty instead.\n"
+    "3) SOURCE PRESENT: a `source` is present on each segment whenever `segments` is "
+    "non-empty.\n"
+    "4) COVERAGE: the company's main reported segments are present. If a segment you are "
+    "confident is material is clearly missing, FAIL and name it. If you are not sure, do not "
+    "flag it.\n"
+    "5) RECENCY: `as_of` names the fiscal period and is recent -- today is {today}. Figures "
+    "more than ~1 year old (e.g. 2023 numbers when today is 2026) are STALE: FAIL them and "
+    "require current-period data."
 )
 
 
@@ -106,8 +126,33 @@ def check_format(data: PortfolioResult) -> PortfolioResult:
             )
         if not any(seg.source for seg in data.segments):
             problems.append("Provide at least one source for a non-empty portfolio.")
+        if not data.as_of.strip():
+            problems.append(
+                "Set `as_of` to the fiscal period the figures are from (read from the "
+                "filing, e.g. 'FY2025')."
+            )
     if problems:
         raise ModelRetry(" ".join(problems))
+    return data
+
+
+@company_agent.output_validator
+def check_sources_read(ctx: RunContext[Deps], data: PortfolioResult) -> PortfolioResult:
+    """Layer 1.5 -- every source must EXACTLY match a page actually web_read (no laundering)."""
+    if not data.segments:
+        return data
+    read = read_urls(ctx.messages)
+    if not read:
+        return data  # nothing read yet; let the other layers handle it
+    bad = unread_sources([s.source for s in data.segments], read)
+    if bad:
+        raise ModelRetry(
+            "Every `source` must EXACTLY match (same host+path) a page you opened with "
+            "web_read. These do NOT -- you never opened them:\n- "
+            + "\n- ".join(sorted(set(bad)))
+            + "\nUse one of the EXACT URLs you actually read:\n- "
+            + "\n- ".join(read)
+        )
     return data
 
 
@@ -120,8 +165,10 @@ async def check_quality(ctx: RunContext[Deps], data: PortfolioResult) -> Portfol
     verdict = await judge(PORTFOLIO_RUBRIC.format(today=today), data, usage=ctx.usage)
     if not verdict.passed:
         raise ModelRetry(
-            "Your previous portfolio was largely correct. Keep everything else identical "
-            "and fix ONLY these specific issues:\n- " + "\n- ".join(verdict.issues)
+            "Your portfolio is close but not done. Fix these -- and if an issue is about a "
+            "missing segment or stale/insufficient data, run MORE searches and `web_read` "
+            "another source to fill it in (don't just resubmit the same list):\n- "
+            + "\n- ".join(verdict.issues)
         )
     return data
 

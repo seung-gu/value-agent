@@ -28,6 +28,7 @@ from pydantic_ai.usage import RunUsage
 
 from agents.deps import Deps
 from agents.judge_agent import judge
+from agents.source_guard import read_urls, unread_sources
 from ports.search_client import SearchClient
 from tools import get_today
 from tools.web import web_read, web_search
@@ -51,26 +52,39 @@ class MarketShareResult(BaseModel):
     """The market-share split found for one sub-industry (the shares sum to ~100)."""
 
     shares: list[ShareFinding] = Field(default_factory=list)
+    as_of: str = ""  # reporting period the shares are FROM, read off the source (e.g. "2024")
 
 
 market_share_agent = Agent(
     MARKET_SHARE_MODEL,
     deps_type=Deps,
     output_type=MarketShareResult,
-    retries=2,
+    retries=4,
     system_prompt=(
-        "You research ONE sub-industry / market and find the COMPANY MARKET SHARES in it. "
-        "FIRST call `get_today` to anchor on today's date, and search for CURRENT data -- "
-        "NOT your training-cutoff year (do not put 2023/2024 in queries unless asked).\n"
-        "WORKFLOW: use `web_search` to FIND a market-share report (IDC, Gartner, Synergy, "
-        "Counterpoint, TrendForce, Statista, company filings), then use `web_read` on the "
-        "best URL to READ that page -- search snippets do NOT contain the share table, so "
-        "READ the actual page and pull the numbers from it. One or two good reads beat many "
-        "searches. Put each leading company's share as a percentage (0-100) in `shares`. "
-        "The shares MUST sum to ~100; add an 'Others' company for the remainder. Use ONLY "
-        "source-backed figures from the page you read -- NEVER invent shares. If no reliable "
-        "share data exists, return an EMPTY `shares` list (better empty than fabricated). "
-        "For each company, put its source URL/note in `source`."
+        "You research ONE sub-industry / market and find the COMPANY MARKET SHARES in it.\n"
+        "FIRST call `get_today` to anchor on today's date, then search for the MOST RECENT "
+        "data available -- not your training-cutoff year.\n"
+        "WORKFLOW:\n"
+        "1) `web_search` to find a market-share report (IDC, Gartner, Synergy, Counterpoint, "
+        "TrendForce, Canalys, Omdia, Statista, or company filings).\n"
+        "2) `web_read` the most promising result -- search snippets rarely hold the full "
+        "share table, so READ the page and pull the real numbers from it.\n"
+        "3) If that source is thin, incomplete, or stale, DO NOT settle: run another search "
+        "with different terms (vendor names, 'market share 2025', the report publisher) and "
+        "`web_read` another page. Cross-check figures across sources when you can.\n"
+        "COVERAGE: include EVERY major player with a non-trivial share -- do not stop at the "
+        "top two or three. The shares MUST sum to ~100; put the unaccounted remainder in a "
+        "single 'Others' entry.\n"
+        "RECENCY: set `as_of` to the reporting period the figures come FROM (read it off the "
+        "source), NOT today's date. Write it as a BARE period only -- exactly 'YYYY' or "
+        "'YYYY-Qn' (e.g. '2024' or '2025-Q4'), with no extra words. Always prefer the most "
+        "recent report you can find.\n"
+        "HONESTY: use ONLY source-backed figures. Each `source` MUST be the URL of a page "
+        "you ACTUALLY opened with web_read -- never cite an upstream link you only saw in "
+        "search results (it may be dead/paywalled), and never invent shares. If the page you "
+        "read attributes the data to someone else, still cite the page you read. Return an "
+        "EMPTY `shares` list ONLY as a last resort, after genuinely trying several searches "
+        "and sources and finding no reputable data -- empty is not a quick way out."
     ),
 )
 
@@ -84,14 +98,20 @@ market_share_agent.tool(web_read)
 
 # Market-share rubric -- domain criteria for the generic judge (sums/sourcing are checkable).
 SHARE_RUBRIC = (
-    "1) Each company in `shares` has a percentage attributable to a reputable market-research "
-    "or filings source (IDC, Gartner, Synergy, Statista, SEC, etc.). Judge by source-domain "
-    "reputation only; do not verify exact URLs.\n"
-    "2) The shares sum to roughly 100 (an 'Others' entry is fine). No invented numbers -- if "
-    "share data is not sourced, `shares` should be empty instead.\n"
-    "3) A `source` is present on each company whenever `shares` is non-empty.\n"
-    "4) The data is RECENT -- today is {today}. Years-old shares (e.g. 2023 figures when "
-    "today is 2026) are STALE: FAIL them and require current-period data."
+    "1) SOURCING: each company's share is attributable to a reputable market-research or "
+    "filings source (IDC, Gartner, Synergy, Counterpoint, TrendForce, Canalys, Omdia, "
+    "Statista, SEC, etc.). Judge by source-domain reputation only; do not verify exact URLs.\n"
+    "2) SUM: the shares sum to roughly 100 (an 'Others' entry is fine). No invented numbers "
+    "-- if share data is not sourced, `shares` should be empty instead.\n"
+    "3) SOURCE PRESENT: a `source` is present on each company whenever `shares` is non-empty.\n"
+    "4) COVERAGE: the obvious market leaders are present. If a company you are confident is a "
+    "major player in THIS specific market is clearly missing, FAIL and name it so it can be "
+    "added. If you are not sure it belongs, do not flag it.\n"
+    "5) RECENCY: `as_of` names the reporting period and is recent -- today is {today}. Data "
+    "older than ~2 years (e.g. 2023 or earlier when today is 2026) is STALE: FAIL it and "
+    "require current data.\n"
+    "6) PLAUSIBILITY: the distribution is internally sensible (e.g. not a single small named "
+    "leader sitting next to a huge unexplained 'Others')."
 )
 
 
@@ -111,8 +131,33 @@ def check_format(data: MarketShareResult) -> MarketShareResult:
             )
         if not any(s.source for s in data.shares):
             problems.append("Provide at least one source for non-empty shares.")
+        if not data.as_of.strip():
+            problems.append(
+                "Set `as_of` to the reporting period the shares are from (read from the "
+                "source, e.g. '2024')."
+            )
     if problems:
         raise ModelRetry(" ".join(problems))
+    return data
+
+
+@market_share_agent.output_validator
+def check_sources_read(ctx: RunContext[Deps], data: MarketShareResult) -> MarketShareResult:
+    """Layer 1.5 -- every source must EXACTLY match a page actually web_read (no laundering)."""
+    if not data.shares:
+        return data
+    read = read_urls(ctx.messages)
+    if not read:
+        return data  # nothing read yet; let the other layers handle it
+    bad = unread_sources([s.source for s in data.shares], read)
+    if bad:
+        raise ModelRetry(
+            "Every `source` must EXACTLY match (same host+path) a page you opened with "
+            "web_read. These do NOT -- you never opened them:\n- "
+            + "\n- ".join(sorted(set(bad)))
+            + "\nUse one of the EXACT URLs you actually read:\n- "
+            + "\n- ".join(read)
+        )
     return data
 
 
@@ -125,8 +170,10 @@ async def check_quality(ctx: RunContext[Deps], data: MarketShareResult) -> Marke
     verdict = await judge(SHARE_RUBRIC.format(today=today), data, usage=ctx.usage)
     if not verdict.passed:
         raise ModelRetry(
-            "Your previous shares were largely correct. Keep everything else identical "
-            "and fix ONLY these specific issues:\n- " + "\n- ".join(verdict.issues)
+            "Your shares are close but not done. Fix these -- and if an issue is about a "
+            "missing player or stale/insufficient data, run MORE searches and `web_read` "
+            "another source to fill it in (don't just resubmit the same list):\n- "
+            + "\n- ".join(verdict.issues)
         )
     return data
 

@@ -8,12 +8,15 @@ Two flows:
   defined) sub-industries -> fan out market_share_agent per sub-industry -> upsert the
   companies (surrogate codes) + store market_share rows for the period.
 
-Depends on the repository PORTS, never on adapters. `period` is the freshness bucket.
+Depends on the repository PORTS, never on adapters. A stored row's `period` is the DATA's own
+reporting date (the agent's `as_of`), and cache freshness is judged from it (see `is_fresh`),
+NOT from when we happened to fetch it.
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import datetime, timezone
 
 from agents.company_agent import research_portfolio
@@ -29,9 +32,23 @@ from ports.search_client import SearchClient
 
 
 def current_period() -> str:
-    """Today's freshness bucket, e.g. '2026-Q2'."""
+    """Fallback period for when the agent couldn't read a reporting date, e.g. '2026-Q2'."""
     now = datetime.now(timezone.utc)
     return f"{now.year}-Q{(now.month - 1) // 3 + 1}"
+
+
+def is_fresh(period: str) -> bool:
+    """A stored reporting period (e.g. '2024', '2024-Q4', 'FY2025') is fresh enough to reuse
+    if its year is within the last two (this year, last year, or the year before); anything
+    older should be re-researched.
+
+    Freshness is judged by the DATA's own period, not by when we happened to fetch it. The
+    year is extracted by regex so prefixed/suffixed formats ('FY2025', '2024-Q4') all work.
+    """
+    match = re.search(r"(?:19|20)\d{2}", period or "")
+    if not match:
+        return False
+    return int(match.group()) >= datetime.now(timezone.utc).year - 2
 
 
 # ---------------------------------------------------------------------------
@@ -95,24 +112,27 @@ async def analyze_sub_industry(
     sub: SubIndustry,
     *,
     search: SearchClient,
-    period: str,
     companies: StaticRepository[Company],
     market_shares: TimeSeriesRepository[MarketShare],
     refresh: bool = False,
 ) -> list[MarketShare]:
     """Fan-out target: research one sub-industry's shares -> upsert companies + store rows.
 
-    Read-before/write-after; never raises (empty on failure). Empty results are NOT stored
-    (so a failed research re-runs next time).
+    Freshness is judged by the DATA's own reporting period (`as_of`), not by when we ran:
+    reuse the most recent stored period if it is still fresh, else re-research. Never raises
+    (empty on failure); empty results are NOT stored (so a failed research re-runs next time).
     """
     try:
         if not refresh:
-            hit = await market_shares.get(sub.sub_code, period)
-            if hit:
-                return hit
+            history = await market_shares.history(sub.sub_code)
+            if history:
+                latest = max(r.period for r in history)
+                if is_fresh(latest):
+                    return [r for r in history if r.period == latest]
         result = await research_market_share(sub.name, search=search)
         if not result.shares:
             return []
+        period = result.as_of.strip() or current_period()
         rows: list[MarketShare] = []
         for sh in result.shares:
             code = await _ensure_company(sh.company, companies=companies)
@@ -143,10 +163,10 @@ async def analyze_sector(
 ) -> dict:
     """For a sector: its industry groups -> their sub-industries -> fan out share research.
 
-    Returns a nested dict (sector -> groups -> sub-industries -> shares) for the API/FE.
-    Sub-industries must already be defined (via the taxonomy flow); groups with none are empty.
+    Returns a nested dict (sector -> groups -> sub-industries -> shares) for the API/FE. Each
+    sub-industry carries `as_of` (the reporting period its data is from). Sub-industries must
+    already be defined (via the taxonomy flow); groups with none are empty.
     """
-    period = current_period()
     groups = await gics.list(sector_code=sector_code)
     # pass 1: research every group's sub-industries (registers companies as a side effect)
     analyzed: list[tuple[GicsReference, list[SubIndustry], list[list[MarketShare]]]] = []
@@ -157,7 +177,6 @@ async def analyze_sector(
                 analyze_sub_industry(
                     s,
                     search=search,
-                    period=period,
                     companies=companies,
                     market_shares=market_shares,
                     refresh=refresh,
@@ -168,7 +187,7 @@ async def analyze_sector(
         analyzed.append((group, subs, filled))
     # pass 2: resolve company names (all registered now) + build the response
     names = {c.company_code: c.name for c in await companies.list()}
-    out: dict = {"sector_code": sector_code, "period": period, "groups": []}
+    out: dict = {"sector_code": sector_code, "groups": []}
     for group, subs, filled in analyzed:
         out["groups"].append(
             {
@@ -178,6 +197,7 @@ async def analyze_sector(
                     {
                         "sub_code": s.sub_code,
                         "name": s.name,
+                        "as_of": shares[0].period if shares else "",
                         "shares": [
                             {
                                 "company_code": m.company_code,
@@ -204,19 +224,24 @@ async def analyze_company_portfolio(
     *,
     search: SearchClient,
     portfolios: TimeSeriesRepository[CompanyPortfolio],
-    period: str | None = None,
     refresh: bool = False,
 ) -> list[CompanyPortfolio]:
-    """Research one company's revenue segments -> store company_portfolio rows for the period."""
-    period = period or current_period()
+    """Research one company's revenue segments -> store company_portfolio rows.
+
+    Freshness is judged by the filing's own period (`as_of`): reuse the most recent stored
+    period if it is still fresh, else re-research.
+    """
     try:
         if not refresh:
-            hit = await portfolios.get(company_code, period)
-            if hit:
-                return hit
+            history = await portfolios.history(company_code)
+            if history:
+                latest = max(r.period for r in history)
+                if is_fresh(latest):
+                    return [r for r in history if r.period == latest]
         result = await research_portfolio(name, search=search)
         if not result.segments:
             return []
+        period = result.as_of.strip() or current_period()
         rows = [
             CompanyPortfolio(
                 company_code=company_code,
