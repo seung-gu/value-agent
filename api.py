@@ -23,9 +23,14 @@ import os
 from contextlib import asynccontextmanager
 
 import httpx
+import logfire
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+logfire.configure(send_to_logfire="if-token-present")
+logfire.instrument_pydantic_ai()
+logfire.instrument_httpx()
 
 from adapters.local.blob_store import LocalBlobStore
 from adapters.serper.search_client import SerperClient

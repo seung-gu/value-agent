@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "pydantic-ai",
+    "logfire[httpx]",
     "httpx",
     "python-dotenv",
     "fastapi>=0.137.1",
