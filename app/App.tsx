@@ -1,12 +1,5 @@
 import { useEffect, useState } from 'react';
-import {
-  ActivityIndicator,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
-} from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { PieChart } from 'react-native-gifted-charts';
 
 // Backend API base URL. EXPO_PUBLIC_API_URL is inlined at build time; localhost fallback.
@@ -23,9 +16,7 @@ type SubIndustry = { sub_code: string; group_code: string; name: string; definit
 type ProposalItem = { name: string; definition: string; rationale: string };
 type Proposal = { subs: ProposalItem[]; sources: string[] };
 type Share = { company_code: string; company_name: string; percentage: number; source: string };
-type AnalyzedSub = { sub_code: string; name: string; shares: Share[] };
-type AnalyzedGroup = { group_code: string; group_name: string; sub_industries: AnalyzedSub[] };
-type SectorResult = { sector_code: string; period: string; groups: AnalyzedGroup[] };
+type SubResult = { sub_code: string; name: string; as_of: string; shares: Share[] };
 type PortfolioRow = {
   company_code: string;
   period: string;
@@ -63,7 +54,8 @@ export default function App() {
   const [groups, setGroups] = useState<Group[]>([]);
   const [taxonomy, setTaxonomy] = useState<Record<string, SubIndustry[]>>({});
   const [proposals, setProposals] = useState<Record<string, Proposal>>({});
-  const [result, setResult] = useState<SectorResult | null>(null);
+  // Analysis results keyed by sub_code -- each sub-industry is analyzed on its own.
+  const [subResults, setSubResults] = useState<Record<string, SubResult>>({});
   const [portfolios, setPortfolios] = useState<Record<string, PortfolioRow[]>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -72,15 +64,15 @@ export default function App() {
     fetch(`${API}/sectors`)
       .then((r) => r.json())
       .then(setSectors)
-      .catch(() => setError("백엔드 연결 실패 (/sectors) — 서버가 켜져 있나요?"));
+      .catch(() => setError('백엔드 연결 실패 (/sectors) — 서버가 켜져 있나요?'));
   }, []);
 
   // Select a sector -> load its industry groups + any already-defined sub-industries.
   async function selectSector(s: Sector) {
     setSel(s);
-    setResult(null);
     setError(null);
     setProposals({});
+    setSubResults({});
     try {
       const gs: Group[] = await fetch(`${API}/groups?sector_code=${s.sector_code}`).then((r) =>
         r.json(),
@@ -137,15 +129,13 @@ export default function App() {
     }
   }
 
-  // Analyze: fill the defined sub-industries' company market shares across the sector.
-  async function analyze() {
-    if (!sel) return;
-    setBusy('analyze');
+  // Analyze ONE sub-industry's company market shares (no sector-wide fan-out).
+  async function analyzeSub(sub: SubIndustry) {
+    setBusy(`sub:${sub.sub_code}`);
     setError(null);
-    setResult(null);
     try {
-      const r: SectorResult = await postJSON('/analyze', { sector_code: sel.sector_code });
-      setResult(r);
+      const r: SubResult = await postJSON('/analyze/sub', { sub_code: sub.sub_code });
+      setSubResults((prev) => ({ ...prev, [sub.sub_code]: r }));
     } catch (e) {
       setError(`분석 실패: ${String(e)}`);
     } finally {
@@ -168,8 +158,6 @@ export default function App() {
     }
   }
 
-  const definedCount = groups.filter((g) => (taxonomy[g.group_code]?.length ?? 0) > 0).length;
-
   return (
     <ScrollView contentContainerStyle={styles.container}>
       <Text style={styles.title}>Value Agent</Text>
@@ -189,12 +177,12 @@ export default function App() {
 
       {error && <Text style={styles.error}>{error}</Text>}
 
-      {/* taxonomy: define sub-industries per group */}
+      {/* per-group: define sub-industries, then analyze each sub-industry on its own */}
       {sel && (
         <View style={styles.card}>
           <Text style={styles.h2}>{sel.sector_name}</Text>
           <Text style={styles.muted}>
-            산업그룹 {groups.length}개 · 정의됨 {definedCount}
+            산업그룹 {groups.length}개 · 세부산업을 정의하고 하나씩 분석
           </Text>
 
           {groups.map((g) => {
@@ -207,7 +195,85 @@ export default function App() {
                 </Text>
 
                 {defs.length > 0 ? (
-                  <Text style={styles.row}>세부산업: {defs.map((d) => d.name).join(', ')}</Text>
+                  defs.map((d) => {
+                    const res = subResults[d.sub_code];
+                    const loading = busy === `sub:${d.sub_code}`;
+                    return (
+                      <View key={d.sub_code} style={styles.subItem}>
+                        <View style={styles.subItemRow}>
+                          <Text style={styles.subItemName}>{d.name}</Text>
+                          <Pressable
+                            style={styles.smallBtn}
+                            onPress={() => analyzeSub(d)}
+                            disabled={loading}
+                          >
+                            <Text style={styles.smallBtnText}>
+                              {loading ? '분석 중…' : res ? '↻ 새로' : '📊 분석'}
+                            </Text>
+                          </Pressable>
+                        </View>
+
+                        {res && res.shares.length > 0 && (
+                          <>
+                            {res.as_of ? <Text style={styles.muted}>기준 {res.as_of}</Text> : null}
+                            <View style={styles.pieWrap}>
+                              <PieChart
+                                data={toPie(
+                                  res.shares.map((s) => ({
+                                    label: s.company_name,
+                                    value: s.percentage,
+                                  })),
+                                )}
+                                radius={68}
+                                showText
+                                textColor="#fff"
+                                textSize={10}
+                              />
+                            </View>
+                            {res.shares.map((s, j) => {
+                              const isOthers = s.company_name.trim().toLowerCase() === 'others';
+                              const pf = portfolios[s.company_code];
+                              return (
+                                <View key={j}>
+                                  <Pressable
+                                    onPress={() => !isOthers && loadPortfolio(s)}
+                                    disabled={isOthers || busy === `pf:${s.company_code}`}
+                                  >
+                                    <Text style={styles.companyRow}>
+                                      <Text style={{ color: PIE_COLORS[j % PIE_COLORS.length] }}>● </Text>
+                                      {s.company_name} — {s.percentage}%
+                                      {!isOthers &&
+                                        (busy === `pf:${s.company_code}`
+                                          ? '  ⏳'
+                                          : pf
+                                            ? ''
+                                            : '  · 포트폴리오')}
+                                    </Text>
+                                  </Pressable>
+                                  {pf && pf.length > 0 && (
+                                    <View style={styles.pieWrap}>
+                                      <PieChart
+                                        data={toPie(
+                                          pf.map((x) => ({ label: x.segment, value: x.percentage })),
+                                        )}
+                                        radius={50}
+                                        showText
+                                        textColor="#fff"
+                                        textSize={9}
+                                      />
+                                    </View>
+                                  )}
+                                </View>
+                              );
+                            })}
+                          </>
+                        )}
+                        {res && res.shares.length === 0 && (
+                          <Text style={styles.muted}>점유율 데이터 없음</Text>
+                        )}
+                      </View>
+                    );
+                  })
                 ) : prop ? (
                   <View>
                     {prop.subs.map((s, i) => (
@@ -239,88 +305,8 @@ export default function App() {
               </View>
             );
           })}
-
-          {definedCount > 0 && (
-            <Pressable style={styles.analyzeBtn} onPress={analyze} disabled={busy === 'analyze'}>
-              <Text style={styles.analyzeBtnText}>
-                {busy === 'analyze' ? '분석 중… (~수 분)' : '📊 이 섹터 점유율 분석'}
-              </Text>
-            </Pressable>
-          )}
         </View>
       )}
-
-      {busy === 'analyze' && (
-        <View style={styles.center}>
-          <ActivityIndicator size="large" />
-        </View>
-      )}
-
-      {/* analysis result: groups -> sub-industries -> share pies */}
-      {result &&
-        result.groups.map((g) => (
-          <View key={g.group_code} style={styles.card}>
-            <Text style={styles.h2}>{g.group_name}</Text>
-            {g.sub_industries.map((sub) => (
-              <View key={sub.sub_code} style={styles.sub}>
-                <Text style={styles.subName}>{sub.name}</Text>
-                {sub.shares.length > 0 ? (
-                  <>
-                    <View style={styles.pieWrap}>
-                      <PieChart
-                        data={toPie(
-                          sub.shares.map((s) => ({ label: s.company_name, value: s.percentage })),
-                        )}
-                        radius={68}
-                        showText
-                        textColor="#fff"
-                        textSize={10}
-                      />
-                    </View>
-                    {sub.shares.map((s, j) => {
-                      const isOthers = s.company_name.trim().toLowerCase() === 'others';
-                      const pf = portfolios[s.company_code];
-                      return (
-                        <View key={j}>
-                          <Pressable
-                            onPress={() => !isOthers && loadPortfolio(s)}
-                            disabled={isOthers || busy === `pf:${s.company_code}`}
-                          >
-                            <Text style={styles.companyRow}>
-                              <Text style={{ color: PIE_COLORS[j % PIE_COLORS.length] }}>● </Text>
-                              {s.company_name} — {s.percentage}%
-                              {!isOthers &&
-                                (busy === `pf:${s.company_code}`
-                                  ? '  ⏳'
-                                  : pf
-                                    ? ''
-                                    : '  · 포트폴리오')}
-                            </Text>
-                          </Pressable>
-                          {pf && pf.length > 0 && (
-                            <View style={styles.pieWrap}>
-                              <PieChart
-                                data={toPie(
-                                  pf.map((x) => ({ label: x.segment, value: x.percentage })),
-                                )}
-                                radius={50}
-                                showText
-                                textColor="#fff"
-                                textSize={9}
-                              />
-                            </View>
-                          )}
-                        </View>
-                      );
-                    })}
-                  </>
-                ) : (
-                  <Text style={styles.muted}>점유율 데이터 없음</Text>
-                )}
-              </View>
-            ))}
-          </View>
-        ))}
     </ScrollView>
   );
 }
@@ -332,7 +318,6 @@ const styles = StyleSheet.create({
   chip: { backgroundColor: '#eef', paddingVertical: 8, paddingHorizontal: 12, borderRadius: 16 },
   chipSel: { backgroundColor: '#c9d8ff' },
   chipText: { fontSize: 13 },
-  center: { alignItems: 'center', marginTop: 24, gap: 8 },
   muted: { color: '#888', fontSize: 12, marginBottom: 6 },
   error: { color: '#c00', marginTop: 16 },
   card: { marginTop: 20, padding: 16, borderRadius: 12, backgroundColor: '#f7f7f9', gap: 4 },
@@ -340,6 +325,9 @@ const styles = StyleSheet.create({
   sub: { marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: '#e3e3ea' },
   subName: { fontSize: 14, fontWeight: '600' },
   row: { fontSize: 13, lineHeight: 19 },
+  subItem: { marginTop: 8, paddingLeft: 8, borderLeftWidth: 2, borderLeftColor: '#e3e3ea' },
+  subItemRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  subItemName: { fontSize: 13, fontWeight: '600', flex: 1 },
   pieWrap: { alignItems: 'center', marginVertical: 10 },
   companyRow: { fontSize: 13, lineHeight: 20 },
   btn: {
@@ -351,13 +339,6 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-start',
   },
   btnText: { fontSize: 13, color: '#2456c4', fontWeight: '600' },
-  analyzeBtn: {
-    marginTop: 14,
-    backgroundColor: '#2456c4',
-    paddingVertical: 11,
-    paddingHorizontal: 14,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  analyzeBtnText: { fontSize: 14, color: '#fff', fontWeight: '700' },
+  smallBtn: { backgroundColor: '#e7eefc', paddingVertical: 5, paddingHorizontal: 10, borderRadius: 6 },
+  smallBtnText: { fontSize: 12, color: '#2456c4', fontWeight: '600' },
 });

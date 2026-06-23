@@ -62,16 +62,18 @@ company_agent = Agent(
         "Advertising, Devices).\n"
         "FIRST call `get_today` to anchor on today's date, then search for the MOST RECENT "
         "breakdown available -- not your training-cutoff year.\n"
-        "WORKFLOW:\n"
-        "1) `web_search` to find the latest segment breakdown (the company's 10-K / annual "
-        "report / 10-Q / IR deck, or reputable coverage of it).\n"
-        "2) `web_read` the most promising result -- snippets rarely hold the segment table, "
-        "so READ the page and pull the real figures from it.\n"
-        "3) If that source is thin, incomplete, or stale, DO NOT settle: search again with "
-        "different terms (the fiscal year, 'segment revenue', '10-K') and `web_read` another "
-        "page.\n"
-        "COVERAGE: include every reported segment. Express each as a percentage (0-100) in "
-        "`segments`; they MUST sum to ~100 -- put any remainder in a single 'Others' segment.\n"
+        "SEARCH DISCIPLINE:\n"
+        "1) Keep each `web_search` SHORT: <=6 plain words, NO quote marks, no guessed page "
+        "titles (e.g. 'Apple segment revenue 2025', not '\"Apple\" \"segment revenue\" "
+        "\"10-K\" 2025').\n"
+        "2) The segment table is usually in the 10-K / 10-Q / annual report -- find it via "
+        "search, then `web_read` the filing or IR page to pull the figures.\n"
+        "3) On a miss, switch ANGLE or SOURCE (the SEC filing itself, the IR page, a "
+        "different outlet) -- never reword the same query.\n"
+        "4) If a few angles come up dry, STOP and return EMPTY segments -- do NOT estimate "
+        "or pad.\n"
+        "COVERAGE: include every reported segment as a percentage (0-100); put any remainder "
+        "in a single 'Others' segment so it sums to ~100.\n"
         "RECENCY: set `as_of` to the fiscal period the figures come FROM (read it off the "
         "filing), NOT today's date. Write it as a BARE period only -- exactly 'FY2024' or "
         "'YYYY-Qn' (e.g. 'FY2025' or '2025-Q3'), with no extra words.\n"
@@ -83,6 +85,17 @@ company_agent = Agent(
         "several sources and finding no reliable breakdown."
     ),
 )
+
+
+@company_agent.system_prompt
+def _today_note() -> str:
+    """Inject today's date every run so the model anchors on the real year, not 2024."""
+    now = datetime.now(timezone.utc)
+    return (
+        f"Today is {now:%Y-%m-%d}; the current year is {now.year}. Put {now.year} or "
+        f"{now.year - 1} (or the latest fiscal year) in your search queries -- NEVER an "
+        "older year like 2024 unless explicitly asked."
+    )
 
 
 # Shared agent tools (tools/): get_today anchors on the date; web_search/web_read delegate

@@ -40,9 +40,10 @@ from agents.sub_industry_agent import SubIndustryFinding, SubIndustryProposal
 from domain import CompanyPortfolio, GicsReference, SubIndustry
 from orchestrator import (
     analyze_company_portfolio,
-    analyze_sector,
+    analyze_sub_industry,
     propose_taxonomy,
     save_taxonomy,
+    shares_response,
 )
 
 # Where the data lives. Local dev: ./data. Railway: set DATA_DIR=/data (the mounted volume).
@@ -151,25 +152,27 @@ async def taxonomy_get(group_code: str) -> list[SubIndustry]:
     return await app.state.storage.sub_industries.list(group_code=group_code)
 
 
-# --- analyze ---------------------------------------------------------------------------
-class AnalyzeRequest(BaseModel):
-    sector_code: str
+# --- analyze (one sub-industry at a time -- no sector-wide fan-out) ---------------------
+class AnalyzeSubRequest(BaseModel):
+    sub_code: str
     refresh: bool = False  # force re-research, bypassing the cache read
 
 
-@app.post("/analyze")
-async def analyze(req: AnalyzeRequest) -> dict:
-    """Sector -> industry groups -> their sub-industries -> company market shares."""
+@app.post("/analyze/sub")
+async def analyze_sub(req: AnalyzeSubRequest) -> dict:
+    """Analyze ONE sub-industry's company market shares (no fan-out across the sector)."""
     s = app.state.storage
-    return await analyze_sector(
-        req.sector_code,
+    sub = await s.sub_industries.get(req.sub_code)
+    if sub is None:
+        raise HTTPException(status_code=404, detail=f"unknown sub-industry: {req.sub_code}")
+    rows = await analyze_sub_industry(
+        sub,
         search=_search(),
-        gics=s.gics,
-        sub_industries=s.sub_industries,
         companies=s.companies,
         market_shares=s.market_shares,
         refresh=req.refresh,
     )
+    return await shares_response(sub, rows, companies=s.companies)
 
 
 class PortfolioRequest(BaseModel):

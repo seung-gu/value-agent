@@ -15,7 +15,6 @@ NOT from when we happened to fetch it.
 
 from __future__ import annotations
 
-import asyncio
 import re
 from datetime import datetime, timezone
 
@@ -151,68 +150,28 @@ async def analyze_sub_industry(
         return []
 
 
-async def analyze_sector(
-    sector_code: str,
+async def shares_response(
+    sub: SubIndustry,
+    rows: list[MarketShare],
     *,
-    search: SearchClient,
-    gics: StaticRepository[GicsReference],
-    sub_industries: StaticRepository[SubIndustry],
     companies: StaticRepository[Company],
-    market_shares: TimeSeriesRepository[MarketShare],
-    refresh: bool = False,
 ) -> dict:
-    """For a sector: its industry groups -> their sub-industries -> fan out share research.
-
-    Returns a nested dict (sector -> groups -> sub-industries -> shares) for the API/FE. Each
-    sub-industry carries `as_of` (the reporting period its data is from). Sub-industries must
-    already be defined (via the taxonomy flow); groups with none are empty.
-    """
-    groups = await gics.list(sector_code=sector_code)
-    # pass 1: research every group's sub-industries (registers companies as a side effect)
-    analyzed: list[tuple[GicsReference, list[SubIndustry], list[list[MarketShare]]]] = []
-    for group in groups:
-        subs = await sub_industries.list(group_code=group.group_code)
-        filled = await asyncio.gather(
-            *[
-                analyze_sub_industry(
-                    s,
-                    search=search,
-                    companies=companies,
-                    market_shares=market_shares,
-                    refresh=refresh,
-                )
-                for s in subs
-            ]
-        )
-        analyzed.append((group, subs, filled))
-    # pass 2: resolve company names (all registered now) + build the response
+    """Shape one sub-industry's market-share rows into the API/FE dict (resolving names)."""
     names = {c.company_code: c.name for c in await companies.list()}
-    out: dict = {"sector_code": sector_code, "groups": []}
-    for group, subs, filled in analyzed:
-        out["groups"].append(
+    return {
+        "sub_code": sub.sub_code,
+        "name": sub.name,
+        "as_of": rows[0].period if rows else "",
+        "shares": [
             {
-                "group_code": group.group_code,
-                "group_name": group.group_name,
-                "sub_industries": [
-                    {
-                        "sub_code": s.sub_code,
-                        "name": s.name,
-                        "as_of": shares[0].period if shares else "",
-                        "shares": [
-                            {
-                                "company_code": m.company_code,
-                                "company_name": names.get(m.company_code, m.company_code),
-                                "percentage": m.percentage,
-                                "source": m.source,
-                            }
-                            for m in shares
-                        ],
-                    }
-                    for s, shares in zip(subs, filled)
-                ],
+                "company_code": m.company_code,
+                "company_name": names.get(m.company_code, m.company_code),
+                "percentage": m.percentage,
+                "source": m.source,
             }
-        )
-    return out
+            for m in rows
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------

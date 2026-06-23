@@ -64,17 +64,21 @@ market_share_agent = Agent(
         "You research ONE sub-industry / market and find the COMPANY MARKET SHARES in it.\n"
         "FIRST call `get_today` to anchor on today's date, then search for the MOST RECENT "
         "data available -- not your training-cutoff year.\n"
-        "WORKFLOW:\n"
-        "1) `web_search` to find a market-share report (IDC, Gartner, Synergy, Counterpoint, "
-        "TrendForce, Canalys, Omdia, Statista, or company filings).\n"
-        "2) `web_read` the most promising result -- search snippets rarely hold the full "
-        "share table, so READ the page and pull the real numbers from it.\n"
-        "3) If that source is thin, incomplete, or stale, DO NOT settle: run another search "
-        "with different terms (vendor names, 'market share 2025', the report publisher) and "
-        "`web_read` another page. Cross-check figures across sources when you can.\n"
-        "COVERAGE: include EVERY major player with a non-trivial share -- do not stop at the "
-        "top two or three. The shares MUST sum to ~100; put the unaccounted remainder in a "
-        "single 'Others' entry.\n"
+        "SEARCH DISCIPLINE (this is where agents fail -- follow it strictly):\n"
+        "1) Keep each `web_search` SHORT: at most ~6 plain words, NO quote marks, and never "
+        "paste a guessed page title. Start broad, then narrow. "
+        "Bad: '\"X market share\" \"by vendor\" 2024 \"Gartner\" \"percent\"'. "
+        "Good: 'X market share by vendor 2025'.\n"
+        "2) Read the answer from the search SNIPPETS first -- shares/figures are often right "
+        "there. Only `web_read` when a snippet shows an OPEN page actually has the table.\n"
+        "3) Prefer OPEN primary sources (EIA, OPEC, the Energy Institute review, company "
+        "filings, government stats). Gated aggregators (Statista, Rystad, Wood Mackenzie, "
+        "Gartner, IDC) are paywalled -- don't try to read them.\n"
+        "4) On a miss, switch ANGLE or SOURCE -- never reword the same query. If a few angles "
+        "all come up dry, STOP and return EMPTY shares: do NOT estimate or pad. No public "
+        "table = empty.\n"
+        "COVERAGE: include every vendor with a non-trivial share from what you found (not "
+        "just the top 2-3); put the remainder in a single 'Others' entry so it sums to ~100.\n"
         "RECENCY: set `as_of` to the reporting period the figures come FROM (read it off the "
         "source), NOT today's date. Write it as a BARE period only -- exactly 'YYYY' or "
         "'YYYY-Qn' (e.g. '2024' or '2025-Q4'), with no extra words. Always prefer the most "
@@ -87,6 +91,17 @@ market_share_agent = Agent(
         "and sources and finding no reputable data -- empty is not a quick way out."
     ),
 )
+
+
+@market_share_agent.system_prompt
+def _today_note() -> str:
+    """Inject today's date every run so the model anchors on the real year, not 2024."""
+    now = datetime.now(timezone.utc)
+    return (
+        f"Today is {now:%Y-%m-%d}; the current year is {now.year}. Put {now.year} or "
+        f"{now.year - 1} in your search queries -- NEVER an older year like 2024 unless "
+        "explicitly asked."
+    )
 
 
 # Shared agent tools (tools/): get_today anchors on the date; web_search/web_read delegate
