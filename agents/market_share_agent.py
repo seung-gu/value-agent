@@ -60,9 +60,15 @@ market_share_agent = research_agent(
     MarketShareResult,
     retries=4,
     instructions=(
-        "You research ONE sub-industry / market and find the COMPANY MARKET SHARES in it.\n"
-        "FIRST call `get_today` to anchor on today's date, then search for the MOST RECENT "
-        "data available -- not your training-cutoff year.\n"
+        "You research ONE given market and find the COMPANY MARKET SHARES in it -- for the "
+        "market EXACTLY AS GIVEN, treated as a single whole.\n"
+        "DO NOT DECOMPOSE the market into sub-segments. If the market is 'Semiconductor "
+        "Materials & Chemicals', find shares for THAT whole market -- do NOT separately "
+        "research photoresist / CMP slurry / silicon wafer / photomask shares and stitch them "
+        "together. One market = one share table. Splitting a market into finer segments is the "
+        "TAXONOMY step's job (upstream), NOT yours. If a combined share table for the market "
+        "as given isn't published, return EMPTY -- do not reconstruct it from sub-segments.\n"
+        "FIRST search for the MOST RECENT data available -- not your training-cutoff year.\n"
         "SEARCH DISCIPLINE (this is where agents fail -- follow it strictly):\n"
         "1) Keep each `web_search` SHORT: at most ~6 plain words, NO quote marks, and never "
         "paste a guessed page title. Start broad, then narrow. "
