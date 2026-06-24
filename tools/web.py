@@ -33,6 +33,7 @@ async def web_search(ctx: RunContext[Deps], query: str) -> str:
             "Institute review, a company filing) or a genuinely different approach."
         )
     ctx.deps.note_query(query)
+    ctx.deps.note_call()  # count only the real search (reword rejections above don't burn budget)
     return await ctx.deps.search.search(query)
 
 
@@ -48,5 +49,6 @@ async def web_read(ctx: RunContext[Deps], url: str) -> str:
             "a login teaser). Take the figure from the search SNIPPETS, or read an OPEN "
             "source (EIA, OPEC, a company filing)."
         )
+    ctx.deps.note_call()  # count only the real fetch (gated skips above don't burn budget)
     text = await ctx.deps.search.scrape(url)
     return text[:8000]  # cap to keep token cost bounded
