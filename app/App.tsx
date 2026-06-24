@@ -15,7 +15,13 @@ type Group = {
 type SubIndustry = { sub_code: string; group_code: string; name: string; definition: string };
 type ProposalItem = { name: string; definition: string; rationale: string };
 type Proposal = { subs: ProposalItem[]; sources: string[] };
-type Share = { company_code: string; company_name: string; percentage: number; source: string };
+type Share = {
+  company_code: string;
+  company_name: string;
+  ticker: string | null;
+  percentage: number;
+  source: string;
+};
 type SubResult = { sub_code: string; name: string; as_of: string; shares: Share[] };
 type FinancialRow = {
   company_code: string;
@@ -34,6 +40,7 @@ type StreamRow = {
 type CompanyResult = {
   company_code: string;
   name: string;
+  ticker: string | null;
   cik: string | null;
   financials: FinancialRow[];
   portfolio: StreamRow[];
@@ -195,7 +202,10 @@ export default function App() {
   async function loadCompany(s: Share) {
     setBusy(`pf:${s.company_code}`);
     try {
-      const co: CompanyResult = await postJSON('/company/analyze', { name: s.company_name });
+      const co: CompanyResult = await postJSON('/company/analyze', {
+        name: s.company_name,
+        ticker: s.ticker,
+      });
       setCompanies((prev) => ({ ...prev, [s.company_code]: co }));
     } catch {
       // ignore -- leave without company detail
@@ -289,7 +299,8 @@ export default function App() {
                                   >
                                     <Text style={styles.companyRow}>
                                       <Text style={{ color: PIE_COLORS[j % PIE_COLORS.length] }}>● </Text>
-                                      {s.company_name} — {s.percentage}%
+                                      {s.company_name}
+                                      {s.ticker ? ` (${s.ticker})` : ''} — {s.percentage}%
                                       {!isOthers &&
                                         (busy === `pf:${s.company_code}`
                                           ? '  ⏳'

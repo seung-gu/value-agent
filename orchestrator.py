@@ -100,17 +100,27 @@ async def save_taxonomy(
 # ---------------------------------------------------------------------------
 # ANALYZE -- fill market shares for a sector's sub-industries.
 # ---------------------------------------------------------------------------
-async def _ensure_company(name: str, *, companies: StaticRepository[Company]) -> str:
+async def _ensure_company(
+    name: str, *, companies: StaticRepository[Company], ticker: str | None = None
+) -> str:
     """Return the surrogate company_code for `name`, registering it if new.
+
+    Stores the `ticker` when known (it's the key we look the company up by in EDGAR) and
+    backfills it onto an existing row that didn't have one yet. An empty ticker is normalized
+    to None so the UNIQUE(ticker) constraint ignores it.
 
     NOTE: under the fan-out this read-then-write can race on the same new name (a harmless
     duplicate row at worst); acceptable for MVP, tighten with a UNIQUE(name) index later.
     """
+    tk = (ticker or "").strip() or None
     existing = await companies.list(name=name)
     if existing:
-        return existing[0].company_code
+        c = existing[0]
+        if tk and not c.ticker:  # learned the ticker after the company was first registered
+            await companies.upsert(Company(company_code=c.company_code, name=c.name, ticker=tk))
+        return c.company_code
     code = f"C{len(await companies.list()) + 1:04d}"
-    await companies.upsert(Company(company_code=code, name=name))
+    await companies.upsert(Company(company_code=code, name=name, ticker=tk))
     return code
 
 
@@ -141,7 +151,7 @@ async def analyze_sub_industry(
         period = result.as_of.strip() or current_period()
         rows: list[MarketShare] = []
         for sh in result.shares:
-            code = await _ensure_company(sh.company, companies=companies)
+            code = await _ensure_company(sh.company, companies=companies, ticker=sh.ticker)
             rows.append(
                 MarketShare(
                     sub_code=sub.sub_code,
@@ -164,7 +174,7 @@ async def shares_response(
     companies: StaticRepository[Company],
 ) -> dict:
     """Shape one sub-industry's market-share rows into the API/FE dict (resolving names)."""
-    names = {c.company_code: c.name for c in await companies.list()}
+    comps = {c.company_code: c for c in await companies.list()}
     return {
         "sub_code": sub.sub_code,
         "name": sub.name,
@@ -172,7 +182,8 @@ async def shares_response(
         "shares": [
             {
                 "company_code": m.company_code,
-                "company_name": names.get(m.company_code, m.company_code),
+                "company_name": comps[m.company_code].name if m.company_code in comps else m.company_code,
+                "ticker": comps[m.company_code].ticker if m.company_code in comps else None,
                 "percentage": m.percentage,
                 "source": m.source,
             }
@@ -238,6 +249,7 @@ async def _company_web_fallback(
 async def analyze_company(
     name: str,
     *,
+    ticker: str | None = None,
     edgar,
     companies: StaticRepository[Company],
     financials: TimeSeriesRepository[CompanyFinancials],
@@ -247,25 +259,26 @@ async def analyze_company(
 ) -> dict:
     """Analyze one company -> financials + portfolio, stored per fiscal period.
 
-    US-listed (EDGAR CIK found) -> edgartools, deterministic. Otherwise -> web fallback
-    (company_agent), when a `search` client is provided.
+    Looked up in EDGAR by TICKER (deterministic). No ticker, or a ticker EDGAR doesn't know
+    (foreign/unlisted) -> web fallback (company_agent) when a `search` client is provided.
     """
-    company_code = await _ensure_company(name, companies=companies)
-    cik = edgar.lookup(name)
+    company_code = await _ensure_company(name, companies=companies, ticker=ticker)
+    tk = (ticker or "").strip()
+    cik = edgar.lookup(tk) if tk else None
     if cik:
         fin_rows = [
             CompanyFinancials(
                 company_code=company_code, period=f.period, account=f.key,
                 amount=f.amount, source=f.source,
             )
-            for f in edgar.financials(name)
+            for f in edgar.financials(tk)
         ]
         seg_rows = [
             CompanyPortfolio(
                 company_code=company_code, period=f.period, stream=f.key,
                 amount=f.amount, source=f.source,
             )
-            for f in edgar.segments(name)
+            for f in edgar.segments(tk)
         ]
         await _replace_by_period(financials, company_code, fin_rows)
         await _replace_by_period(portfolios, company_code, seg_rows)
@@ -279,6 +292,7 @@ async def analyze_company(
     return {
         "company_code": company_code,
         "name": name,
+        "ticker": tk or None,
         "cik": cik,
         "financials": [r.model_dump() for r in fin],
         "portfolio": [r.model_dump() for r in port],

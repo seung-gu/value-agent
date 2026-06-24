@@ -2,7 +2,12 @@
 
 edgartools parses the filing XBRL (handling format drift + the dimensional/segment data that the
 raw companyfacts API omits), so financials and product-level segments come back as plain numbers
--- NO regex/HTML parsing, NO LLM. CIK stays inside the adapter; callers pass ticker/name.
+-- NO regex/HTML parsing, NO LLM. CIK stays inside the adapter.
+
+Callers pass a TICKER (or CIK) -- NOT a company name. Names are hopeless to match (Apple /
+Apple Inc. / 애플), so the upstream agent captures each company's ticker and we look up EDGAR by
+that. A non-US / unlisted company has no usable ticker here -> lookup returns None and the
+orchestrator uses the web fallback (company_agent).
 """
 
 from __future__ import annotations
@@ -53,19 +58,26 @@ def _val(row) -> float | None:
 
 
 class SecEdgarClient:
-    """EdgarClient over edgartools -- deterministic financials + product segments."""
+    """EdgarClient over edgartools -- deterministic financials + product segments.
 
-    def lookup(self, name_or_ticker: str) -> str | None:
-        """Return the CIK if the company is SEC-registered (US-listed), else None."""
+    Identified by TICKER or CIK (never a company name). An unknown/foreign ticker raises inside
+    edgartools, which every method turns into an empty/None result -> the caller falls back.
+    """
+
+    def lookup(self, ticker: str) -> str | None:
+        """Return the CIK if `ticker` is a real SEC-registered (US-listed) company, else None."""
         try:
-            cik = getattr(Company(name_or_ticker.strip()), "cik", None)
+            cik = getattr(Company(ticker.strip()), "cik", None)
             return str(cik) if cik else None
         except Exception:
             return None
 
-    def financials(self, ident: str) -> list[EdgarFact]:
+    def financials(self, ticker: str) -> list[EdgarFact]:
         """Company-level accounts (revenue / operating_income / net_income / ocf), per fiscal year."""
-        xb = Company(ident.strip()).get_financials().xb
+        try:
+            xb = Company(ticker.strip()).get_financials().xb
+        except Exception:
+            return []
         out: list[EdgarFact] = []
         for concept, account in _ACCOUNTS.items():
             df = xb.query().by_concept(concept).to_dataframe()
@@ -77,9 +89,12 @@ class SecEdgarClient:
                     out.append(EdgarFact(key=account, period=period, amount=amount))
         return out
 
-    def segments(self, ident: str) -> list[EdgarFact]:
+    def segments(self, ticker: str) -> list[EdgarFact]:
         """Product-level revenue streams (iPhone / Mac / … / Services), per fiscal year."""
-        xb = Company(ident.strip()).get_financials().xb
+        try:
+            xb = Company(ticker.strip()).get_financials().xb
+        except Exception:
+            return []
         df = (
             xb.query()
             .by_concept(_REVENUE_CONCEPT)

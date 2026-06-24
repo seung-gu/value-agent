@@ -178,16 +178,18 @@ async def analyze_sub(req: AnalyzeSubRequest) -> dict:
 
 
 class CompanyAnalyzeRequest(BaseModel):
-    name: str           # company name or ticker
+    name: str                      # company display name
+    ticker: str | None = None      # US exchange ticker (from market-share); drives the EDGAR lookup
     refresh: bool = False
 
 
 @app.post("/company/analyze")
 async def company_analyze(req: CompanyAnalyzeRequest) -> dict:
-    """One company's financials + portfolio. US-listed -> EDGAR (edgartools); else web fallback."""
+    """One company's financials + portfolio. Ticker -> EDGAR (edgartools); else web fallback."""
     s = app.state.storage
     return await analyze_company(
         req.name,
+        ticker=req.ticker,
         edgar=app.state.edgar,
         companies=s.companies,
         financials=s.financials,

@@ -44,6 +44,7 @@ class ShareFinding(BaseModel):
     """One company's market share within a sub-industry (agent output -- name, not code)."""
 
     company: str                             # company name as found
+    ticker: str = ""                         # US exchange ticker if listed (e.g. "NVDA"), else ""
     percentage: float = Field(ge=0, le=100)  # % within the sub-industry, source-backed
     source: str = ""                         # source URL / short note
 
@@ -79,6 +80,10 @@ market_share_agent = Agent(
         "table = empty.\n"
         "COVERAGE: include every vendor with a non-trivial share from what you found (not "
         "just the top 2-3); put the remainder in a single 'Others' entry so it sums to ~100.\n"
+        "TICKER: for each company set `ticker` to its primary US stock-exchange ticker (e.g. "
+        "'NVDA', 'AVGO', or a US-listed ADR like 'TSM') when it is US-listed; leave it EMPTY "
+        "for private, foreign-only, or aggregate ('Others') entries. It's used to pull SEC "
+        "financials, so give the REAL exchange ticker -- empty is better than a wrong guess.\n"
         "RECENCY: set `as_of` to the reporting period the figures come FROM (read it off the "
         "source), NOT today's date. Write it as a BARE period only -- exactly 'YYYY' or "
         "'YYYY-Qn' (e.g. '2024' or '2025-Q4'), with no extra words. Always prefer the most "
