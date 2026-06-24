@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from datetime import datetime, timezone
 
 import httpx
 from dotenv import load_dotenv
@@ -67,6 +68,17 @@ sub_industry_agent = Agent(
         "hype. Record `sources`. If the user gives feedback on a previous list, revise it."
     ),
 )
+
+
+@sub_industry_agent.system_prompt
+def _today_note() -> str:
+    """Inject today's date every run so the model searches the current year, not its 2024 cutoff."""
+    now = datetime.now(timezone.utc)
+    return (
+        f"Today is {now:%Y-%m-%d}; the current year is {now.year}. When you research, search "
+        f"for {now.year} or {now.year - 1} sources -- NEVER an older year like 2024 unless "
+        "explicitly asked."
+    )
 
 
 # Shared agent tools (tools/): get_today anchors on the date; web_search/web_read delegate
