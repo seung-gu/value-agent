@@ -18,14 +18,21 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
-from agents.company_agent import research_portfolio
+from agents.company_agent import research_company
 from agents.market_share_agent import research_market_share
 from agents.sub_industry_agent import (
     SubIndustryFinding,
     SubIndustryProposal,
     propose_sub_industries,
 )
-from domain import Company, CompanyPortfolio, GicsReference, MarketShare, SubIndustry
+from domain import (
+    Company,
+    CompanyFinancials,
+    CompanyPortfolio,
+    GicsReference,
+    MarketShare,
+    SubIndustry,
+)
 from ports.repository import StaticRepository, TimeSeriesRepository
 from ports.search_client import SearchClient
 
@@ -175,43 +182,104 @@ async def shares_response(
 
 
 # ---------------------------------------------------------------------------
-# PORTFOLIO -- one company's revenue breakdown (same breakdown pattern as market_share).
+# COMPANY -- financials + portfolio. EDGAR (US-listed) is deterministic; else web fallback.
 # ---------------------------------------------------------------------------
-async def analyze_company_portfolio(
+async def _replace_by_period(repo, parent: str, rows: list) -> None:
+    """Group rows by period and replace each (parent, period) set atomically (idempotent)."""
+    by_period: dict[str, list] = {}
+    for r in rows:
+        by_period.setdefault(r.period, []).append(r)
+    for period, group in by_period.items():
+        await repo.replace(parent, period, group)
+
+
+async def _company_web_fallback(
     company_code: str,
     name: str,
     *,
     search: SearchClient,
+    financials: TimeSeriesRepository[CompanyFinancials],
     portfolios: TimeSeriesRepository[CompanyPortfolio],
     refresh: bool = False,
-) -> list[CompanyPortfolio]:
-    """Research one company's revenue segments -> store company_portfolio rows.
+) -> None:
+    """Non-US / unlisted: company_agent researches financials + portfolio (freshness-gated).
 
-    Freshness is judged by the filing's own period (`as_of`): reuse the most recent stored
-    period if it is still fresh, else re-research.
+    Web research is expensive, so reuse the most recent stored period while it's still fresh.
+    Empty results are NOT stored (so a failed run re-researches next time).
     """
-    try:
-        if not refresh:
-            history = await portfolios.history(company_code)
-            if history:
-                latest = max(r.period for r in history)
-                if is_fresh(latest):
-                    return [r for r in history if r.period == latest]
-        result = await research_portfolio(name, search=search)
-        if not result.segments:
-            return []
-        period = result.as_of.strip() or current_period()
-        rows = [
-            CompanyPortfolio(
-                company_code=company_code,
-                period=period,
-                segment=s.segment,
-                percentage=s.percentage,
-                source=s.source,
+    if not refresh:
+        history = await financials.history(company_code)
+        if history and is_fresh(max(r.period for r in history)):
+            return
+    result = await research_company(name, search=search)
+    if not (result.financials or result.portfolio):
+        return
+    period = result.as_of.strip() or current_period()
+    fin_rows = [
+        CompanyFinancials(
+            company_code=company_code, period=period,
+            account=f.account, amount=f.amount, source=f.source,
+        )
+        for f in result.financials
+    ]
+    seg_rows = [
+        CompanyPortfolio(
+            company_code=company_code, period=period,
+            stream=s.stream, amount=s.amount, source=s.source,
+        )
+        for s in result.portfolio
+    ]
+    if fin_rows:
+        await financials.replace(company_code, period, fin_rows)
+    if seg_rows:
+        await portfolios.replace(company_code, period, seg_rows)
+
+
+async def analyze_company(
+    name: str,
+    *,
+    edgar,
+    companies: StaticRepository[Company],
+    financials: TimeSeriesRepository[CompanyFinancials],
+    portfolios: TimeSeriesRepository[CompanyPortfolio],
+    search: SearchClient | None = None,
+    refresh: bool = False,
+) -> dict:
+    """Analyze one company -> financials + portfolio, stored per fiscal period.
+
+    US-listed (EDGAR CIK found) -> edgartools, deterministic. Otherwise -> web fallback
+    (company_agent), when a `search` client is provided.
+    """
+    company_code = await _ensure_company(name, companies=companies)
+    cik = edgar.lookup(name)
+    if cik:
+        fin_rows = [
+            CompanyFinancials(
+                company_code=company_code, period=f.period, account=f.key,
+                amount=f.amount, source=f.source,
             )
-            for s in result.segments
+            for f in edgar.financials(name)
         ]
-        await portfolios.replace(company_code, period, rows)
-        return rows
-    except Exception:
-        return []
+        seg_rows = [
+            CompanyPortfolio(
+                company_code=company_code, period=f.period, stream=f.key,
+                amount=f.amount, source=f.source,
+            )
+            for f in edgar.segments(name)
+        ]
+        await _replace_by_period(financials, company_code, fin_rows)
+        await _replace_by_period(portfolios, company_code, seg_rows)
+    elif search is not None:
+        await _company_web_fallback(
+            company_code, name, search=search,
+            financials=financials, portfolios=portfolios, refresh=refresh,
+        )
+    fin = await financials.history(company_code)
+    port = await portfolios.history(company_code)
+    return {
+        "company_code": company_code,
+        "name": name,
+        "cik": cik,
+        "financials": [r.model_dump() for r in fin],
+        "portfolio": [r.model_dump() for r in port],
+    }

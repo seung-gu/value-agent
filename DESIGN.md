@@ -39,7 +39,7 @@
 
 ## 데이터 소스
 - **섹터 시장규모·CAGR·성장 전망**: 깔끔한 무료 API 없음(Statista €199/월~, IBISWorld $800+/건 등 유료) → **agent가 웹 검색으로 공개 헤드라인 수치를 조사** (웹검색 tool: **Serper** — 저렴 $0.3~1/1k, raw Google SERP). 정형 데이터 보조: Helgi Library(30개 섹터 무료), Data.gov.
-- **개별 기업 주가·재무**: 무료 API — Finnhub(60/분, 관대), FMP(섹터·재무 깊이, SEC 30년), Alpha Vantage(MCP 네이티브, 25/일).
+- **개별 기업 재무·세그먼트(미국 상장사)**: **SEC EDGAR** — 무료·공식·게이트 없음. **edgartools** 라이브러리로 회사 총계 재무(매출·영업이익·순이익·현금흐름)와 제품/세그먼트별 매출을 XBRL 1차 소스에서 결정적으로 추출(ticker→cik 변환·XBRL 파싱·포맷 드리프트는 라이브러리가 처리 → regex·LLM 없음). 외국·비상장은 `company_agent` 웹검색 fallback. (기타 무료 재무 API: Finnhub, FMP, Alpha Vantage)
 - 섹터 평가 지표: CAGR, 시장규모 성장률 + **agent 자율 판단으로 추가 지표 조사**.
 
 ## 핵심 설계 원칙
@@ -61,7 +61,7 @@
 
 2단계  POST /refine ...          ── 사용자가 지목한 곳만 깊게
   refine_sub_industry(name) → 빈 세부산업 점유율 채움 (industry_agent 1개)
-  refine_company(name)      → 그 회사 포트폴리오 (company_agent 1개)
+  refine_company(name)      → 그 회사 재무+포트폴리오 (미국 상장사=EDGAR 결정적, 그 외=company_agent 웹)
 ```
 
 ### 점진적 채우기(progressive refinement) 원칙
@@ -83,17 +83,18 @@
 1. **고정 레퍼런스 ↔ 동적 데이터** — GICS 시드(read-only)와 agent가 write하는 분석 결과를 같은 테이블에 섞지 않는다.
 2. **정적 ↔ 시계열** — 분기마다 변하는 값은 `period`를 PK에 넣어 **행으로 누적**한다(스키마는 영구 고정, 새 분기는 `INSERT` 한 줄). 분기를 컬럼(`q1_pct`…)으로 늘리지 않는다(= ALTER 지옥, 안티패턴).
 
-→ 결과적으로 **정적 3 + 시계열 3 = 6 테이블**(대칭). MVP는 `company_portfolio` 없이 5개로 시작 가능하며, 파이차트가 필요해지면 1개만 추가하면 된다(`market_share`와 동일 구조라 trivial).
+→ 정적 3(`gics_reference`·`sub_industry`·`company`) + 시계열 4(`sub_industry_kpi`·`market_share`·`company_portfolio`·`company_financials`) = **7 테이블**. company의 세그먼트 매출·재무지표는 미국 상장사라면 EDGAR에서 한 번의 cik 조회로 같이 채운다.
 
 ### ER Diagram
 
 ```mermaid
 erDiagram
     gics_reference ||--o{ sub_industry        : "그룹 1:N 세부산업"
-    sub_industry   ||--o{ sub_industry_metric : "분기별 지표"
+    sub_industry   ||--o{ sub_industry_kpi : "분기별 지표"
     sub_industry   ||--o{ market_share        : "분기별 점유율"
     company        ||--o{ market_share        : "분기별 점유율"
-    company        ||--o{ company_portfolio   : "분기별 포트폴리오"
+    company        ||--o{ company_portfolio   : "기간별 세그먼트 매출"
+    company        ||--o{ company_financials   : "기간별 재무지표"
 
     gics_reference {
         string group_code  PK "예: 4530"
@@ -110,9 +111,9 @@ erDiagram
     company {
         string company_code PK "예: C001 (surrogate)"
         string name
-        string url
+        string ticker         "UNIQUE, nullable (EDGAR cik 매핑용)"
     }
-    sub_industry_metric {
+    sub_industry_kpi {
         string sub_code PK "FK + period 복합 PK"
         string period   PK
         float  cagr
@@ -128,9 +129,16 @@ erDiagram
     }
     company_portfolio {
         string company_code PK "FK"
-        string segment      PK
+        string stream       PK "예: iPhone, Services"
         string period       PK
-        float  percentage
+        float  amount          "USD 절대 매출"
+        string source
+    }
+    company_financials {
+        string company_code PK "FK"
+        string account      PK "예: revenue, net_income"
+        string period       PK
+        float  amount          "USD"
         string source
     }
 ```
@@ -140,11 +148,11 @@ erDiagram
 ```
 [정적 — period 없음]                 [시계열 — period로 분기 누적]
 
-gics_reference                       sub_industry_metric   (sub_code, period)
+gics_reference                       sub_industry_kpi   (sub_code, period)
    │ 1:N                          ┌─► market_share         (sub_code, company_code, period)
-sub_industry ──1:N──┬──1:N────────┘   company_portfolio    (company_code, segment, period)
-                    └──1:N────────► (sub_industry_metric)
-company ──1:N───────────────────────► market_share / company_portfolio
+sub_industry ──1:N──┬──1:N────────┘   company_portfolio    (company_code, stream, period)
+                    └──1:N────────► (sub_industry_kpi)   company_financials    (company_code, account, period)
+company ──1:N───────────────────────► market_share / company_portfolio / company_financials
 ```
 
 ### 테이블 정의
@@ -155,26 +163,29 @@ company ──1:N─────────────────────
 |------|----|------|-----------|
 | `gics_reference` | `group_code` PK | sector_code, sector_name, group_name | GICS 고정 시드(read-only) |
 | `sub_industry` | `sub_code` PK, `group_code` FK | name, definition | sub_industry_agent (ReAct + HITL) |
-| `company` | `company_code` PK | name, url | 점유율 조사 중 발견 시 등록 |
+| `company` | `company_code` PK, `ticker` UNIQUE(nullable) | name, ticker | 점유율/재무 조사 중 발견 시 등록 (ticker 있으면 dedup·EDGAR 매핑) |
 
 **시계열 (period로 분기마다 행 누적 — 분석 결과)**
 
 | 테이블 | PK | 컬럼 | 의미 |
 |------|----|------|-----|
-| `sub_industry_metric` | (`sub_code`, `period`) | cagr, penetration | 세부산업의 분기별 지표 |
+| `sub_industry_kpi` | (`sub_code`, `period`) | cagr, penetration | 세부산업의 분기별 지표 |
 | `market_share` | (`sub_code`, `company_code`, `period`) | percentage | 세부산업 내 회사별 점유율 |
-| `company_portfolio` | (`company_code`, `segment`, `period`) | percentage | 회사 매출의 사업부문별 비중 |
+| `company_portfolio` | (`company_code`, `stream`, `period`) | amount | 회사 매출의 세그먼트별 절대액 (EDGAR edgartools, 그 외 company_agent) |
+| `company_financials` | (`company_code`, `account`, `period`) | amount | 회사 재무지표 — revenue·operating_income·net_income·operating_cash_flow 등 (EDGAR edgartools, 그 외 company_agent) |
 
 > 시계열 3테이블은 각 수치의 출처 추적용 `source` 컬럼을 공통으로 포함한다(가짜 수치 방지 — 기존 설계 원칙 유지).
 
 ### 시계열 = 분해(breakdown) 패턴
 
-`market_share`와 `company_portfolio`는 **구조가 동일**하다 — 둘 다 `(부모, 조각, period) → percentage`이고 분기마다 조각들의 합이 ~100%:
+`market_share`와 `company_portfolio`는 **분해 구조가 동일**하다 — 둘 다 `(부모, 조각, period) → 값`으로 부모를 조각들로 나눈다:
 
 ```
-market_share      : sub_industry 를 → company들로 분해   (Foundry = TSMC 60% + Samsung 15% + …)
-company_portfolio : company 를      → segment들로 분해   (Microsoft = Cloud 40% + Office 30% + …)
+market_share      : sub_industry 를 → company들로 분해   (Foundry = TSMC 70% + Samsung 7% + …, 합 ~100%)
+company_portfolio : company 를      → stream들로 분해    (Apple = iPhone $209B + Services $109B + …, 합 = 총 revenue)
 ```
+
+(`company_financials`은 분해가 아니라 **독립 재무지표 묶음**이라 이 패턴 밖이다 — revenue·net_income 등은 서로 더하지 않는다.)
 
 저장은 **덮어쓰기가 아니라 누적**: 같은 `(sub_code, company_code)`라도 분기가 다르면 별개 행으로 공존 → 과거 추이가 자동 보존. 조회는 최신만 보려면 `WHERE period = '2026-Q2'`, 추이는 한 키로 `ORDER BY period`. 실제 저장값은 이름이 아니라 **surrogate code**이며 표시할 때 마스터 테이블과 조인한다.
 
@@ -187,10 +198,11 @@ company_portfolio : company 를      → segment들로 분해   (Microsoft = Clo
 | `StaticRepository[T]` | `upsert` · `get(code)` · `list(**where)` | `StaticTable` |
 | `TimeSeriesRepository[T]` | `replace(parent, period, rows)` · `get(parent, period)` · `history(parent)` | `TimeSeriesTable` |
 
-- **도메인 엔티티**: `domain/` (gics_reference · sub_industry+metric · company+portfolio · market_share)
-- **연결·DDL**: `adapters/sqlite/base.py` (6테이블, WAL + `foreign_keys=ON`)
+- **도메인 엔티티**: `domain/` (gics_reference · sub_industry+kpi · company+portfolio+financials · market_share)
+- **연결·DDL**: `adapters/sqlite/base.py` (7테이블, WAL + `foreign_keys=ON`)
 - **시드**: `adapters/sqlite/seed.py` (25 industry groups, idempotent upsert)
-- **조립**: `SqliteStorage` — `.gics .sub_industries .companies` (정적) / `.metrics .market_shares .portfolios` (시계열)
+- **조립**: `SqliteStorage` — `.gics .sub_industries .companies` (정적) / `.kpis .market_shares .portfolios .financials` (시계열)
+- **EDGAR 어댑터**: `adapters/edgar/client.py`의 `SecEdgarClient` — **edgartools**로 미국 상장사 재무·세그먼트를 XBRL 1차 소스에서 추출. 회사 총계 재무 + 제품/세그먼트별 매출을 `get_financials()` 한 번으로 같이 얻고, ticker↔cik 변환·XBRL 파싱·포맷 드리프트는 라이브러리가 처리(regex·LLM 없음). **cik는 어댑터 내부에서만**(도메인·DB 미노출). edgar는 tool/client일 뿐 port 아님 → `ports/edgar.py` 없음. 외국·비상장은 `company_agent` 웹 fallback.
 - 시계열 저장은 덮어쓰기가 아니라 **`(parent, period)` 단위 원자적 교체**(재실행 idempotent). 조회는 최신=`get`, 추이=`history`.
 
 ## 미정

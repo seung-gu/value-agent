@@ -1,9 +1,9 @@
-"""SQLite plumbing -- shared connection + the 6-table schema (DDL).
+"""SQLite plumbing -- shared connection + the 7-table schema (DDL).
 
-The 6 domain tables split into two shapes:
+The 7 domain tables split into two shapes:
 - STATIC (gics_reference, sub_industry, company): code-keyed master rows, no period.
-- TIME-SERIES (sub_industry_metric, market_share, company_portfolio): `period` is part of
-  the PK, so rows accumulate one set per period (the schema never changes -- only INSERTs).
+- TIME-SERIES (sub_industry_kpi, market_share, company_portfolio, company_financials): `period`
+  is part of the PK, so rows accumulate one set per period (schema never changes -- only INSERTs).
 
 DDL is explicit here (one CREATE per table -- the schemas genuinely differ); the generic
 CRUD lives in repository.py. Column names == pydantic field names, so the repos can map
@@ -33,12 +33,12 @@ CREATE TABLE IF NOT EXISTS sub_industry (
 );
 
 CREATE TABLE IF NOT EXISTS company (
-    company_code TEXT PRIMARY KEY,       -- surrogate 'C001'
+    company_code TEXT PRIMARY KEY,       -- surrogate 'C0001'
     name         TEXT NOT NULL,
-    url          TEXT NOT NULL DEFAULT ''
+    ticker       TEXT UNIQUE             -- nullable; UNIQUE dedups listed companies + EDGAR map
 );
 
-CREATE TABLE IF NOT EXISTS sub_industry_metric (
+CREATE TABLE IF NOT EXISTS sub_industry_kpi (
     sub_code    TEXT NOT NULL REFERENCES sub_industry(sub_code),
     period      TEXT NOT NULL,           -- '2026-Q2'
     cagr        REAL,                    -- nullable (may be unknown)
@@ -59,10 +59,19 @@ CREATE TABLE IF NOT EXISTS market_share (
 CREATE TABLE IF NOT EXISTS company_portfolio (
     company_code TEXT NOT NULL REFERENCES company(company_code),
     period       TEXT NOT NULL,
-    segment      TEXT NOT NULL,
-    percentage   REAL NOT NULL,
+    stream       TEXT NOT NULL,          -- 'iPhone', 'Services', ...
+    amount       REAL NOT NULL,          -- USD revenue attributed to the stream
     source       TEXT NOT NULL DEFAULT '',
-    PRIMARY KEY (company_code, segment, period)
+    PRIMARY KEY (company_code, stream, period)
+);
+
+CREATE TABLE IF NOT EXISTS company_financials (
+    company_code TEXT NOT NULL REFERENCES company(company_code),
+    period       TEXT NOT NULL,
+    account      TEXT NOT NULL,          -- 'revenue', 'net_income', ...
+    amount       REAL NOT NULL,          -- USD (may be negative, e.g. net loss)
+    source       TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (company_code, account, period)
 );
 """
 

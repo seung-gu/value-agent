@@ -17,12 +17,26 @@ type ProposalItem = { name: string; definition: string; rationale: string };
 type Proposal = { subs: ProposalItem[]; sources: string[] };
 type Share = { company_code: string; company_name: string; percentage: number; source: string };
 type SubResult = { sub_code: string; name: string; as_of: string; shares: Share[] };
-type PortfolioRow = {
+type FinancialRow = {
   company_code: string;
   period: string;
-  segment: string;
-  percentage: number;
+  account: string;
+  amount: number;
   source: string;
+};
+type StreamRow = {
+  company_code: string;
+  period: string;
+  stream: string;
+  amount: number;
+  source: string;
+};
+type CompanyResult = {
+  company_code: string;
+  name: string;
+  cik: string | null;
+  financials: FinancialRow[];
+  portfolio: StreamRow[];
 };
 
 const PIE_COLORS = [
@@ -36,6 +50,40 @@ function toPie(items: { label: string; value: number }[]) {
     text: `${Math.round(it.value)}%`,
     color: PIE_COLORS[i % PIE_COLORS.length],
   }));
+}
+
+const ACCOUNT_LABELS: Record<string, string> = {
+  revenue: '매출',
+  operating_income: '영업이익',
+  net_income: '순이익',
+  operating_cash_flow: '영업현금흐름',
+};
+
+// Portfolio streams are absolute amounts -> pie by share of their sum (text shows the %).
+function toPieByAmount(items: { label: string; value: number }[]) {
+  const sum = items.reduce((a, b) => a + b.value, 0) || 1;
+  return items.map((it, i) => ({
+    value: it.value,
+    text: `${Math.round((it.value / sum) * 100)}%`,
+    color: PIE_COLORS[i % PIE_COLORS.length],
+  }));
+}
+
+// Compact money label (currency-agnostic; T/B/M units). Sign preserved for losses.
+function fmtAmount(n: number) {
+  const a = Math.abs(n);
+  const sign = n < 0 ? '-' : '';
+  if (a >= 1e12) return `${sign}${(a / 1e12).toFixed(1)}T`;
+  if (a >= 1e9) return `${sign}${(a / 1e9).toFixed(1)}B`;
+  if (a >= 1e6) return `${sign}${(a / 1e6).toFixed(1)}M`;
+  return `${sign}${a.toLocaleString()}`;
+}
+
+// The rows of the most recent fiscal period (periods sort lexically: 'FY2025' > 'FY2024').
+function latestPeriod<T extends { period: string }>(rows: T[]): T[] {
+  if (rows.length === 0) return [];
+  const p = [...rows].map((r) => r.period).sort().at(-1);
+  return rows.filter((r) => r.period === p);
 }
 
 async function postJSON(path: string, body: unknown) {
@@ -56,7 +104,7 @@ export default function App() {
   const [proposals, setProposals] = useState<Record<string, Proposal>>({});
   // Analysis results keyed by sub_code -- each sub-industry is analyzed on its own.
   const [subResults, setSubResults] = useState<Record<string, SubResult>>({});
-  const [portfolios, setPortfolios] = useState<Record<string, PortfolioRow[]>>({});
+  const [companies, setCompanies] = useState<Record<string, CompanyResult>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -143,16 +191,14 @@ export default function App() {
     }
   }
 
-  // Tap a company -> its revenue portfolio (segment pie).
-  async function loadPortfolio(s: Share) {
+  // Tap a company -> its financials + revenue portfolio (EDGAR for US-listed, else web).
+  async function loadCompany(s: Share) {
     setBusy(`pf:${s.company_code}`);
     try {
-      const pf: PortfolioRow[] = await postJSON('/company/portfolio', {
-        company_code: s.company_code,
-      });
-      setPortfolios((prev) => ({ ...prev, [s.company_code]: pf }));
+      const co: CompanyResult = await postJSON('/company/analyze', { name: s.company_name });
+      setCompanies((prev) => ({ ...prev, [s.company_code]: co }));
     } catch {
-      // ignore -- leave without a portfolio
+      // ignore -- leave without company detail
     } finally {
       setBusy(null);
     }
@@ -232,11 +278,13 @@ export default function App() {
                             </View>
                             {res.shares.map((s, j) => {
                               const isOthers = s.company_name.trim().toLowerCase() === 'others';
-                              const pf = portfolios[s.company_code];
+                              const co = companies[s.company_code];
+                              const fins = co ? latestPeriod(co.financials) : [];
+                              const streams = co ? latestPeriod(co.portfolio) : [];
                               return (
                                 <View key={j}>
                                   <Pressable
-                                    onPress={() => !isOthers && loadPortfolio(s)}
+                                    onPress={() => !isOthers && loadCompany(s)}
                                     disabled={isOthers || busy === `pf:${s.company_code}`}
                                   >
                                     <Text style={styles.companyRow}>
@@ -245,22 +293,38 @@ export default function App() {
                                       {!isOthers &&
                                         (busy === `pf:${s.company_code}`
                                           ? '  ⏳'
-                                          : pf
+                                          : co
                                             ? ''
-                                            : '  · 포트폴리오')}
+                                            : '  · 상세')}
                                     </Text>
                                   </Pressable>
-                                  {pf && pf.length > 0 && (
-                                    <View style={styles.pieWrap}>
-                                      <PieChart
-                                        data={toPie(
-                                          pf.map((x) => ({ label: x.segment, value: x.percentage })),
-                                        )}
-                                        radius={50}
-                                        showText
-                                        textColor="#fff"
-                                        textSize={9}
-                                      />
+                                  {co && (
+                                    <View style={styles.companyDetail}>
+                                      {fins.length > 0 && (
+                                        <View style={styles.finRow}>
+                                          {fins.map((f, k) => (
+                                            <Text key={k} style={styles.finItem}>
+                                              {ACCOUNT_LABELS[f.account] ?? f.account} {fmtAmount(f.amount)}
+                                            </Text>
+                                          ))}
+                                        </View>
+                                      )}
+                                      {streams.length > 0 && (
+                                        <View style={styles.pieWrap}>
+                                          <PieChart
+                                            data={toPieByAmount(
+                                              streams.map((x) => ({ label: x.stream, value: x.amount })),
+                                            )}
+                                            radius={50}
+                                            showText
+                                            textColor="#fff"
+                                            textSize={9}
+                                          />
+                                        </View>
+                                      )}
+                                      {fins.length === 0 && streams.length === 0 && (
+                                        <Text style={styles.muted}>재무·포트폴리오 데이터 없음</Text>
+                                      )}
                                     </View>
                                   )}
                                 </View>
@@ -330,6 +394,9 @@ const styles = StyleSheet.create({
   subItemName: { fontSize: 13, fontWeight: '600', flex: 1 },
   pieWrap: { alignItems: 'center', marginVertical: 10 },
   companyRow: { fontSize: 13, lineHeight: 20 },
+  companyDetail: { marginTop: 4, marginBottom: 6, paddingLeft: 14 },
+  finRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 2 },
+  finItem: { fontSize: 12, color: '#444' },
   btn: {
     marginTop: 6,
     backgroundColor: '#e7eefc',

@@ -12,4 +12,5 @@ dependencies = [
     "fastapi>=0.137.1",
     "uvicorn[standard]>=0.49.0",
     "aiosqlite>=0.22.1",
+    "edgartools>=5.39.1",
 ]

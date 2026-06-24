@@ -1,14 +1,14 @@
 """Domain entities -- pure data, no dependencies on ports/adapters.
 
-Six entities mirroring the DB tables: three STATIC (GicsReference, SubIndustry, Company)
-and three TIME-SERIES (SubIndustryMetric, MarketShare, CompanyPortfolio). Re-exported so
-callers can `from domain import MarketShare` regardless of the module it lives in.
+Seven entities mirroring the DB tables: three STATIC (GicsReference, SubIndustry, Company)
+and four TIME-SERIES (SubIndustryKpi, MarketShare, CompanyPortfolio, CompanyFinancials).
+Re-exported so callers can `from domain import MarketShare` regardless of the module it lives in.
 """
 
-from domain.company import Company, CompanyPortfolio
+from domain.company import Company, CompanyFinancials, CompanyPortfolio
 from domain.gics_reference import GicsReference
 from domain.market_share import MarketShare
-from domain.sub_industry import SubIndustry, SubIndustryMetric
+from domain.sub_industry import SubIndustry, SubIndustryKpi
 
 __all__ = [
     # static
@@ -16,7 +16,8 @@ __all__ = [
     "SubIndustry",
     "Company",
     # time-series
-    "SubIndustryMetric",
+    "SubIndustryKpi",
     "MarketShare",
     "CompanyPortfolio",
+    "CompanyFinancials",
 ]

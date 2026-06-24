@@ -32,14 +32,15 @@ logfire.configure(send_to_logfire="if-token-present")
 logfire.instrument_pydantic_ai()
 logfire.instrument_httpx()
 
+from adapters.edgar.client import SecEdgarClient
 from adapters.local.blob_store import LocalBlobStore
 from adapters.serper.search_client import SerperClient
 from adapters.sqlite import SqliteStorage
 from adapters.sqlite.seed import seed_gics
 from agents.sub_industry_agent import SubIndustryFinding, SubIndustryProposal
-from domain import CompanyPortfolio, GicsReference, SubIndustry
+from domain import GicsReference, SubIndustry
 from orchestrator import (
-    analyze_company_portfolio,
+    analyze_company,
     analyze_sub_industry,
     propose_taxonomy,
     save_taxonomy,
@@ -66,6 +67,7 @@ async def lifespan(app: FastAPI):
     app.state.storage = await SqliteStorage.open(f"{DATA_DIR}/cache.db")
     await seed_gics(app.state.storage.gics)  # 25 GICS industry groups, idempotent
     app.state.blobs = _make_blobs(app.state.http)
+    app.state.edgar = SecEdgarClient()  # edgartools wrapper -- US-listed financials + segments
     yield
     await app.state.storage.close()
     await app.state.http.aclose()
@@ -175,22 +177,22 @@ async def analyze_sub(req: AnalyzeSubRequest) -> dict:
     return await shares_response(sub, rows, companies=s.companies)
 
 
-class PortfolioRequest(BaseModel):
-    company_code: str
+class CompanyAnalyzeRequest(BaseModel):
+    name: str           # company name or ticker
     refresh: bool = False
 
 
-@app.post("/company/portfolio")
-async def company_portfolio(req: PortfolioRequest) -> list[CompanyPortfolio]:
-    """One company's revenue breakdown by segment (the portfolio pie), stored per period."""
-    company = await app.state.storage.companies.get(req.company_code)
-    if company is None:
-        raise HTTPException(status_code=404, detail=f"unknown company: {req.company_code}")
-    return await analyze_company_portfolio(
-        req.company_code,
-        company.name,
+@app.post("/company/analyze")
+async def company_analyze(req: CompanyAnalyzeRequest) -> dict:
+    """One company's financials + portfolio. US-listed -> EDGAR (edgartools); else web fallback."""
+    s = app.state.storage
+    return await analyze_company(
+        req.name,
+        edgar=app.state.edgar,
+        companies=s.companies,
+        financials=s.financials,
+        portfolios=s.portfolios,
         search=_search(),
-        portfolios=app.state.storage.portfolios,
         refresh=req.refresh,
     )
 

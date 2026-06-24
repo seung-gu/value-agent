@@ -1,7 +1,7 @@
 """Sub-industry domain -- the analysis unit below an industry group.
 
 `SubIndustry` is the STATIC definition (curated once by the sub_industry_agent + human
-review, then fixed). `SubIndustryMetric` is its quarterly time-series (cagr, penetration),
+review, then fixed). `SubIndustryKpi` is its quarterly time-series (cagr, penetration),
 accumulated one row per period -- kept separate so the definition never drifts per quarter.
 """
 
@@ -19,7 +19,7 @@ class SubIndustry(BaseModel):
     definition: str = ""   # short scope description
 
 
-class SubIndustryMetric(BaseModel):
+class SubIndustryKpi(BaseModel):
     """A sub-industry's metrics for one period (time-series row)."""
 
     sub_code: str                                                  # FK -> SubIndustry.sub_code
