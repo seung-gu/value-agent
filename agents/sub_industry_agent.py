@@ -15,19 +15,17 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import datetime, timezone
 
 import httpx
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent, ModelRetry, RunContext
+from pydantic_ai import ModelRetry, RunContext
 from pydantic_ai.usage import RunUsage
 
 from agents.deps import Deps
 from agents.judge_agent import judge
+from agents.research import research_agent
 from ports.search_client import SearchClient
-from tools import get_today
-from tools.web import web_read, web_search
 
 load_dotenv()  # load SUB_INDUSTRY_MODEL / LLM_MODEL / keys from .env
 
@@ -51,12 +49,11 @@ class SubIndustryProposal(BaseModel):
     sources: list[str] = Field(default_factory=list)
 
 
-sub_industry_agent = Agent(
+sub_industry_agent = research_agent(
     SUB_INDUSTRY_MODEL,
-    deps_type=Deps,
-    output_type=SubIndustryProposal,
+    SubIndustryProposal,
     retries=2,
-    system_prompt=(
+    instructions=(
         "You identify the SUB-INDUSTRIES (analysis units) inside ONE GICS industry group. "
         "FIRST call `get_today`. Given an industry group, use `web_search` then `web_read` to "
         "research how that group is actually segmented by the market, then propose 3-8 "
@@ -68,24 +65,6 @@ sub_industry_agent = Agent(
         "hype. Record `sources`. If the user gives feedback on a previous list, revise it."
     ),
 )
-
-
-@sub_industry_agent.system_prompt
-def _today_note() -> str:
-    """Inject today's date every run so the model searches the current year, not its 2024 cutoff."""
-    now = datetime.now(timezone.utc)
-    return (
-        f"Today is {now:%Y-%m-%d}; the current year is {now.year}. When you research, search "
-        f"for {now.year} or {now.year - 1} sources -- NEVER an older year like 2024 unless "
-        "explicitly asked."
-    )
-
-
-# Shared agent tools (tools/): get_today anchors on the date; web_search/web_read delegate
-# to the SearchClient adapter in Deps.
-sub_industry_agent.tool_plain(get_today)
-sub_industry_agent.tool(web_search)
-sub_industry_agent.tool(web_read)
 
 
 PROPOSAL_RUBRIC = (

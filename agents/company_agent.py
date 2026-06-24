@@ -25,15 +25,14 @@ from datetime import datetime, timezone
 import httpx
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent, ModelRetry, RunContext
+from pydantic_ai import ModelRetry, RunContext
 from pydantic_ai.usage import RunUsage
 
 from agents.deps import Deps
 from agents.judge_agent import judge
+from agents.research import research_agent
 from agents.source_guard import read_urls, unread_sources
 from ports.search_client import SearchClient
-from tools import get_today
-from tools.web import web_read, web_search
 
 load_dotenv()  # load COMPANY_MODEL / LLM_MODEL / keys from .env
 
@@ -67,12 +66,11 @@ class CompanyResult(BaseModel):
     as_of: str = ""  # the fiscal period the figures are FROM, read off the report (e.g. "FY2025")
 
 
-company_agent = Agent(
+company_agent = research_agent(
     COMPANY_MODEL,
-    deps_type=Deps,
-    output_type=CompanyResult,
+    CompanyResult,
     retries=4,
-    system_prompt=(
+    instructions=(
         "You research ONE company's FINANCIALS and its REVENUE PORTFOLIO (segment breakdown) "
         "from public reports, for its most recent fiscal year.\n"
         "FIRST call `get_today` to anchor on today's date, then search for the latest annual "
@@ -101,24 +99,6 @@ company_agent = Agent(
         "guessing."
     ),
 )
-
-
-@company_agent.system_prompt
-def _today_note() -> str:
-    """Inject today's date every run so the model anchors on the real year, not 2024."""
-    now = datetime.now(timezone.utc)
-    return (
-        f"Today is {now:%Y-%m-%d}; the current year is {now.year}. Put {now.year} or "
-        f"{now.year - 1} (or the latest fiscal year) in your search queries -- NEVER an "
-        "older year like 2024 unless explicitly asked."
-    )
-
-
-# Shared agent tools (tools/): get_today anchors on the date; web_search/web_read delegate
-# to the SearchClient adapter in Deps.
-company_agent.tool_plain(get_today)
-company_agent.tool(web_search)
-company_agent.tool(web_read)
 
 
 # Company rubric -- domain criteria for the generic judge (sourcing + the portfolio↔revenue tie).
