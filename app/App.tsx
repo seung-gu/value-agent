@@ -17,7 +17,6 @@ type SubIndustry = {
   group_code: string;
   name: string;
   definition: string;
-  parent_sub_code?: string | null; // set if this was split off a broader sub-industry
 };
 type ProposalItem = { name: string; definition: string; rationale: string };
 type Proposal = { subs: ProposalItem[]; sources: string[] };
@@ -216,7 +215,6 @@ export default function App() {
               group_code: sub.group_code,
               name: c.name,
               definition: c.definition,
-              parent_sub_code: sub.sub_code,
             }));
           if (fresh.length === 0) return prev;
           const idx = cur.findIndex((e) => e.sub_code === sub.sub_code);
@@ -288,7 +286,7 @@ export default function App() {
                   defs.map((d) => {
                     const res = subResults[d.sub_code];
                     const loading = busy === `sub:${d.sub_code}`;
-                    const isChild = !!d.parent_sub_code;
+                    const isChild = /-S\d+$/.test(d.sub_code); // split child, e.g. '4530-06-S01'
                     return (
                       <View key={d.sub_code} style={[styles.subItem, isChild && styles.childItem]}>
                         <View style={styles.subItemRow}>

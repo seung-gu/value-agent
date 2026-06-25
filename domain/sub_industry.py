@@ -13,17 +13,15 @@ from pydantic import BaseModel, Field
 class SubIndustry(BaseModel):
     """A sub-industry under an industry group (e.g. 'Foundry') -- static definition.
 
-    `parent_sub_code` is set when this unit was SPLIT OFF a broader sub-industry whose players
-    sit in different segments (e.g. 'Semiconductor Materials' -> Silicon Wafers / Photoresists):
-    market_share, finding no combined ranking, returns the segment list and the orchestrator
-    registers each as a child sub-industry the user can then analyze on its own.
+    A segment split off a broader sub-industry is just another row, with a sub_code derived from
+    its parent's ('4530-06' -> '4530-06-S01'); the parent relationship lives in that naming, so
+    no extra column is needed (splitting taxonomy = adding rows, not changing the schema).
     """
 
-    sub_code: str                       # surrogate, e.g. "4530-01"
-    group_code: str                     # FK -> GicsReference.group_code
-    name: str                           # "Foundry"
-    definition: str = ""                # short scope description
-    parent_sub_code: str | None = None  # set if split off a broader sub-industry
+    sub_code: str          # surrogate, e.g. "4530-01" (child of a split: "4530-06-S01")
+    group_code: str        # FK -> GicsReference.group_code
+    name: str              # "Foundry"
+    definition: str = ""   # short scope description
 
 
 class SubIndustryKpi(BaseModel):

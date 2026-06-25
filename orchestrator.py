@@ -143,7 +143,8 @@ async def analyze_sub_industry(
     """
     try:
         if not refresh:
-            children = await sub_industries.list(parent_sub_code=sub.sub_code)
+            siblings = await sub_industries.list(group_code=sub.group_code)
+            children = [c for c in siblings if c.sub_code.startswith(f"{sub.sub_code}-S")]
             if children:
                 return {"shares": [], "split": children}
             history = await market_shares.history(sub.sub_code)
@@ -160,7 +161,6 @@ async def analyze_sub_industry(
                     group_code=sub.group_code,
                     name=seg.name,
                     definition=seg.definition,
-                    parent_sub_code=sub.sub_code,
                 )
                 await sub_industries.upsert(child)
                 children.append(child)
