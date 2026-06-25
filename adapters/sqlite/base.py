@@ -26,10 +26,11 @@ CREATE TABLE IF NOT EXISTS gics_reference (
 );
 
 CREATE TABLE IF NOT EXISTS sub_industry (
-    sub_code   TEXT PRIMARY KEY,         -- surrogate '4530-01'
-    group_code TEXT NOT NULL REFERENCES gics_reference(group_code),
-    name       TEXT NOT NULL,
-    definition TEXT NOT NULL DEFAULT ''
+    sub_code        TEXT PRIMARY KEY,    -- surrogate '4530-01'
+    group_code      TEXT NOT NULL REFERENCES gics_reference(group_code),
+    name            TEXT NOT NULL,
+    definition      TEXT NOT NULL DEFAULT '',
+    parent_sub_code TEXT REFERENCES sub_industry(sub_code)  -- set if split off a broader sub-industry
 );
 
 CREATE TABLE IF NOT EXISTS company (

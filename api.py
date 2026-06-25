@@ -167,14 +167,30 @@ async def analyze_sub(req: AnalyzeSubRequest) -> dict:
     sub = await s.sub_industries.get(req.sub_code)
     if sub is None:
         raise HTTPException(status_code=404, detail=f"unknown sub-industry: {req.sub_code}")
-    rows = await analyze_sub_industry(
+    result = await analyze_sub_industry(
         sub,
         search=_search(),
         companies=s.companies,
         market_shares=s.market_shares,
+        sub_industries=s.sub_industries,
         refresh=req.refresh,
     )
-    return await shares_response(sub, rows, companies=s.companies)
+    if result["split"]:
+        # too broad for a combined ranking -> agent split it into child sub-industries
+        return {
+            "sub_code": sub.sub_code,
+            "name": sub.name,
+            "kind": "split",
+            "as_of": "",
+            "shares": [],
+            "children": [
+                {"sub_code": c.sub_code, "name": c.name, "definition": c.definition}
+                for c in result["split"]
+            ],
+        }
+    resp = await shares_response(sub, result["shares"], companies=s.companies)
+    resp["kind"] = "shares"
+    return resp
 
 
 class CompanyAnalyzeRequest(BaseModel):

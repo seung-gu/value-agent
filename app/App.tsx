@@ -12,7 +12,13 @@ type Group = {
   sector_name: string;
   group_name: string;
 };
-type SubIndustry = { sub_code: string; group_code: string; name: string; definition: string };
+type SubIndustry = {
+  sub_code: string;
+  group_code: string;
+  name: string;
+  definition: string;
+  parent_sub_code?: string | null; // set if this was split off a broader sub-industry
+};
 type ProposalItem = { name: string; definition: string; rationale: string };
 type Proposal = { subs: ProposalItem[]; sources: string[] };
 type Share = {
@@ -22,7 +28,15 @@ type Share = {
   percentage: number;
   source: string;
 };
-type SubResult = { sub_code: string; name: string; as_of: string; shares: Share[] };
+type SubChild = { sub_code: string; name: string; definition: string };
+type SubResult = {
+  sub_code: string;
+  name: string;
+  kind?: 'shares' | 'split';
+  as_of: string;
+  shares: Share[]; // [] when kind==='split'
+  children?: SubChild[]; // present when kind==='split'
+};
 type FinancialRow = {
   company_code: string;
   period: string;
@@ -191,6 +205,26 @@ export default function App() {
     try {
       const r: SubResult = await postJSON('/analyze/sub', { sub_code: sub.sub_code });
       setSubResults((prev) => ({ ...prev, [sub.sub_code]: r }));
+      if (r.kind === 'split' && r.children) {
+        // register the child segments right under their parent so each can be analyzed
+        setTaxonomy((prev) => {
+          const cur = prev[sub.group_code] ?? [];
+          const fresh = r
+            .children!.filter((c) => !cur.some((e) => e.sub_code === c.sub_code))
+            .map((c) => ({
+              sub_code: c.sub_code,
+              group_code: sub.group_code,
+              name: c.name,
+              definition: c.definition,
+              parent_sub_code: sub.sub_code,
+            }));
+          if (fresh.length === 0) return prev;
+          const idx = cur.findIndex((e) => e.sub_code === sub.sub_code);
+          const next = [...cur];
+          next.splice(idx + 1, 0, ...fresh);
+          return { ...prev, [sub.group_code]: next };
+        });
+      }
     } catch (e) {
       setError(`분석 실패: ${String(e)}`);
     } finally {
@@ -254,10 +288,14 @@ export default function App() {
                   defs.map((d) => {
                     const res = subResults[d.sub_code];
                     const loading = busy === `sub:${d.sub_code}`;
+                    const isChild = !!d.parent_sub_code;
                     return (
-                      <View key={d.sub_code} style={styles.subItem}>
+                      <View key={d.sub_code} style={[styles.subItem, isChild && styles.childItem]}>
                         <View style={styles.subItemRow}>
-                          <Text style={styles.subItemName}>{d.name}</Text>
+                          <Text style={styles.subItemName}>
+                            {isChild ? '↳ ' : ''}
+                            {d.name}
+                          </Text>
                           <Pressable
                             style={styles.smallBtn}
                             onPress={() => analyzeSub(d)}
@@ -269,7 +307,12 @@ export default function App() {
                           </Pressable>
                         </View>
 
-                        {res && res.shares.length > 0 && (
+                        {res && res.kind === 'split' && (
+                          <Text style={styles.muted}>
+                            세부 세그먼트로 나뉘었어 — 아래 ↳ 항목을 각각 분석해줘
+                          </Text>
+                        )}
+                        {res && res.kind !== 'split' && res.shares.length > 0 && (
                           <>
                             {res.as_of ? <Text style={styles.muted}>기준 {res.as_of}</Text> : null}
                             <View style={styles.pieWrap}>
@@ -343,7 +386,7 @@ export default function App() {
                             })}
                           </>
                         )}
-                        {res && res.shares.length === 0 && (
+                        {res && res.kind !== 'split' && res.shares.length === 0 && (
                           <Text style={styles.muted}>점유율 데이터 없음</Text>
                         )}
                       </View>
@@ -404,6 +447,7 @@ const styles = StyleSheet.create({
   subItemRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   subItemName: { fontSize: 13, fontWeight: '600', flex: 1 },
   pieWrap: { alignItems: 'center', marginVertical: 10 },
+  childItem: { marginLeft: 16, borderLeftColor: '#c9d8ff' },
   companyRow: { fontSize: 13, lineHeight: 20 },
   companyDetail: { marginTop: 4, marginBottom: 6, paddingLeft: 14 },
   finRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 2 },

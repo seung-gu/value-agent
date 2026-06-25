@@ -11,12 +11,19 @@ from pydantic import BaseModel, Field
 
 
 class SubIndustry(BaseModel):
-    """A sub-industry under an industry group (e.g. 'Foundry') -- static definition."""
+    """A sub-industry under an industry group (e.g. 'Foundry') -- static definition.
 
-    sub_code: str          # surrogate, e.g. "4530-01"
-    group_code: str        # FK -> GicsReference.group_code
-    name: str              # "Foundry"
-    definition: str = ""   # short scope description
+    `parent_sub_code` is set when this unit was SPLIT OFF a broader sub-industry whose players
+    sit in different segments (e.g. 'Semiconductor Materials' -> Silicon Wafers / Photoresists):
+    market_share, finding no combined ranking, returns the segment list and the orchestrator
+    registers each as a child sub-industry the user can then analyze on its own.
+    """
+
+    sub_code: str                       # surrogate, e.g. "4530-01"
+    group_code: str                     # FK -> GicsReference.group_code
+    name: str                           # "Foundry"
+    definition: str = ""                # short scope description
+    parent_sub_code: str | None = None  # set if split off a broader sub-industry
 
 
 class SubIndustryKpi(BaseModel):

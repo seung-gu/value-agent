@@ -130,24 +130,43 @@ async def analyze_sub_industry(
     search: SearchClient,
     companies: StaticRepository[Company],
     market_shares: TimeSeriesRepository[MarketShare],
+    sub_industries: StaticRepository[SubIndustry],
     refresh: bool = False,
-) -> list[MarketShare]:
-    """Fan-out target: research one sub-industry's shares -> upsert companies + store rows.
+) -> dict:
+    """Research one sub-industry. Returns {"shares": [...], "split": [...]} -- exactly one is set.
 
-    Freshness is judged by the DATA's own reporting period (`as_of`), not by when we ran:
-    reuse the most recent stored period if it is still fresh, else re-research. Never raises
-    (empty on failure); empty results are NOT stored (so a failed research re-runs next time).
+    Normal case -> market shares (stored). If the market is too broad to have a combined ranking,
+    the agent returns the segments instead; we register each as a CHILD sub-industry
+    (`parent_sub_code`) the user can then analyze on its own, and return them under "split". An
+    already-split sub-industry returns its existing children. Freshness is judged by the stored
+    period. Never raises (empty on failure; empties are NOT stored).
     """
     try:
         if not refresh:
+            children = await sub_industries.list(parent_sub_code=sub.sub_code)
+            if children:
+                return {"shares": [], "split": children}
             history = await market_shares.history(sub.sub_code)
             if history:
                 latest = max(r.period for r in history)
                 if is_fresh(latest):
-                    return [r for r in history if r.period == latest]
+                    return {"shares": [r for r in history if r.period == latest], "split": []}
         result = await research_market_share(sub.name, search=search)
+        if result.split_into:
+            children: list[SubIndustry] = []
+            for i, seg in enumerate(result.split_into, 1):
+                child = SubIndustry(
+                    sub_code=f"{sub.sub_code}-S{i:02d}",
+                    group_code=sub.group_code,
+                    name=seg.name,
+                    definition=seg.definition,
+                    parent_sub_code=sub.sub_code,
+                )
+                await sub_industries.upsert(child)
+                children.append(child)
+            return {"shares": [], "split": children}
         if not result.shares:
-            return []
+            return {"shares": [], "split": []}
         period = result.as_of.strip() or current_period()
         rows: list[MarketShare] = []
         for sh in result.shares:
@@ -162,9 +181,9 @@ async def analyze_sub_industry(
                 )
             )
         await market_shares.replace(sub.sub_code, period, rows)
-        return rows
+        return {"shares": rows, "split": []}
     except Exception:
-        return []
+        return {"shares": [], "split": []}
 
 
 async def shares_response(

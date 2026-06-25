@@ -48,10 +48,18 @@ class ShareFinding(BaseModel):
     source: str = ""                         # source URL / short note
 
 
+class SplitSegment(BaseModel):
+    """A sub-segment to split a too-broad market into -- name + scope only, NO shares yet."""
+
+    name: str             # "Silicon Wafers"
+    definition: str = ""  # one-line scope
+
+
 class MarketShareResult(BaseModel):
-    """The market-share split found for one sub-industry (the shares sum to ~100)."""
+    """Either the shares for the market, OR (if too broad) the segments to split it into."""
 
     shares: list[ShareFinding] = Field(default_factory=list)
+    split_into: list[SplitSegment] = Field(default_factory=list)  # set INSTEAD of shares when broad
     as_of: str = ""  # reporting period the shares are FROM, read off the source (e.g. "2024")
 
 
@@ -60,14 +68,21 @@ market_share_agent = research_agent(
     MarketShareResult,
     retries=4,
     instructions=(
-        "You research ONE given market and find the COMPANY MARKET SHARES in it -- for the "
-        "market EXACTLY AS GIVEN, treated as a single whole.\n"
-        "DO NOT DECOMPOSE the market into sub-segments. If the market is 'Semiconductor "
-        "Materials & Chemicals', find shares for THAT whole market -- do NOT separately "
-        "research photoresist / CMP slurry / silicon wafer / photomask shares and stitch them "
-        "together. One market = one share table. Splitting a market into finer segments is the "
-        "TAXONOMY step's job (upstream), NOT yours. If a combined share table for the market "
-        "as given isn't published, return EMPTY -- do not reconstruct it from sub-segments.\n"
+        "You research ONE given market and find the COMPANY MARKET SHARES in it.\n"
+        "Look for ONE combined vendor-share table for the market. If it exists, return those "
+        "shares.\n"
+        "BUT if the market is too BROAD to have a single combined ranking -- its players sit in "
+        "different segments each ranked separately (e.g. 'Semiconductor Materials & Chemicals' = "
+        "wafer makers + photoresist makers + CMP + gas makers, with no combined table) -- then "
+        "STOP. Do NOT research each segment's shares. Return EMPTY `shares` and instead fill "
+        "`split_into` with the sub-segments the market breaks into (name + one-line scope), e.g. "
+        "Silicon Wafers / Photoresists / CMP Slurries / Electronic Gases.\n"
+        "ONLY list a segment in `split_into` if COMPANY MARKET SHARES are ACTUALLY reported for "
+        "it (a vendor ranking exists -- e.g. CMP slurries: Entegris/Versum/Fujimi). EXCLUDE niche "
+        "ancillaries / sub-categories with no published vendor share (e.g. 'photoresist "
+        "ancillaries', 'SOI wafers', 'ceramic packages') -- splitting into those just yields "
+        "empty clicks. The USER analyzes each segment on its own later -- you just NAME them. A "
+        "search or two is enough to SEE the split; do NOT chase the actual share numbers.\n"
         "FIRST search for the MOST RECENT data available -- not your training-cutoff year.\n"
         "SEARCH DISCIPLINE (this is where agents fail -- follow it strictly):\n"
         "1) Keep each `web_search` SHORT: at most ~6 plain words, NO quote marks, and never "
@@ -129,6 +144,8 @@ SHARE_RUBRIC = (
 def check_format(data: MarketShareResult) -> MarketShareResult:
     """Layer 1 -- deterministic checks on the shares (pure compute -> sync)."""
     problems: list[str] = []
+    if data.shares and data.split_into:
+        problems.append("Return EITHER `shares` OR `split_into`, never both.")
     for s in data.shares:
         if not 0.0 <= s.percentage <= 100.0:
             problems.append(f"Company '{s.company}' share must be between 0 and 100.")
