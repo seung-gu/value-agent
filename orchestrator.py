@@ -144,7 +144,11 @@ async def analyze_sub_industry(
     try:
         if not refresh:
             siblings = await sub_industries.list(group_code=sub.group_code)
-            children = [c for c in siblings if c.sub_code.startswith(f"{sub.sub_code}-S")]
+            prefix = f"{sub.sub_code}-"  # direct children only (e.g. '4530-06-01', not grandkids)
+            children = [
+                c for c in siblings
+                if c.sub_code.startswith(prefix) and "-" not in c.sub_code[len(prefix):]
+            ]
             if children:
                 return {"shares": [], "split": children}
             history = await market_shares.history(sub.sub_code)
@@ -157,7 +161,7 @@ async def analyze_sub_industry(
             children: list[SubIndustry] = []
             for i, seg in enumerate(result.split_into, 1):
                 child = SubIndustry(
-                    sub_code=f"{sub.sub_code}-S{i:02d}",
+                    sub_code=f"{sub.sub_code}-{i:02d}",  # materialized path: parent + child number
                     group_code=sub.group_code,
                     name=seg.name,
                     definition=seg.definition,

@@ -286,9 +286,18 @@ export default function App() {
                   defs.map((d) => {
                     const res = subResults[d.sub_code];
                     const loading = busy === `sub:${d.sub_code}`;
-                    const isChild = /-S\d+$/.test(d.sub_code); // split child, e.g. '4530-06-S01'
+                    // materialized path depth: '4530-01' = 1, '4530-06-01' = 2 (a child), ...
+                    const depth = d.sub_code.split('-').length - 1;
+                    const isChild = depth > 1;
                     return (
-                      <View key={d.sub_code} style={[styles.subItem, isChild && styles.childItem]}>
+                      <View
+                        key={d.sub_code}
+                        style={[
+                          styles.subItem,
+                          isChild && styles.childItem,
+                          isChild && { marginLeft: (depth - 1) * 16 },
+                        ]}
+                      >
                         <View style={styles.subItemRow}>
                           <Text style={styles.subItemName}>
                             {isChild ? '↳ ' : ''}
@@ -445,7 +454,7 @@ const styles = StyleSheet.create({
   subItemRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   subItemName: { fontSize: 13, fontWeight: '600', flex: 1 },
   pieWrap: { alignItems: 'center', marginVertical: 10 },
-  childItem: { marginLeft: 16, borderLeftColor: '#c9d8ff' },
+  childItem: { borderLeftColor: '#c9d8ff' },
   companyRow: { fontSize: 13, lineHeight: 20 },
   companyDetail: { marginTop: 4, marginBottom: 6, paddingLeft: 14 },
   finRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 2 },
