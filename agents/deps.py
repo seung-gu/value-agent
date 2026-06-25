@@ -30,6 +30,7 @@ class Deps:
     max_calls: int = 25
     _calls: int = field(default=0, init=False)
     _queries: list[str] = field(default_factory=list, init=False)
+    _read: set[str] = field(default_factory=set, init=False)
 
     def over_budget(self) -> bool:
         """True once the ceiling of ACTUAL search/scrape calls is reached (does NOT increment).
@@ -44,16 +45,30 @@ class Deps:
         self._calls += 1
 
     def is_repeat(self, query: str) -> bool:
-        """True if `query` near-duplicates one already tried (Jaccard token overlap > 0.6)."""
+        """True if `query` near-duplicates one already tried (Jaccard token overlap > 0.5).
+
+        Lowered from 0.6 so slight rewordings of the same search are caught -- e.g. 'photoresist
+        market share 2025' vs 'photoresist vendors share 2025' (overlap 0.6). Kept above 0.5 so a
+        genuinely different query like 'Synopsys revenue 2025' vs 'Cadence revenue 2025' (0.5)
+        still gets through.
+        """
         toks = set(query.lower().split())
         if not toks:
             return False
         for prev in self._queries:
             ptoks = set(prev.lower().split())
-            if ptoks and len(toks & ptoks) / len(toks | ptoks) > 0.6:
+            if ptoks and len(toks & ptoks) / len(toks | ptoks) > 0.5:
                 return True
         return False
 
     def note_query(self, query: str) -> None:
         """Remember a query that was actually issued (for is_repeat checks)."""
         self._queries.append(query)
+
+    def already_read(self, url: str) -> bool:
+        """True if this URL was already fetched this run (avoid re-scraping the same huge PDF)."""
+        return url.strip() in self._read
+
+    def note_read(self, url: str) -> None:
+        """Remember a URL actually fetched, so a repeat fetch of it can be rejected."""
+        self._read.add(url.strip())

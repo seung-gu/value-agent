@@ -43,12 +43,18 @@ async def web_read(ctx: RunContext[Deps], url: str) -> str:
     """
     if ctx.deps.over_budget():
         return _LIMIT_MSG
+    if ctx.deps.already_read(url):
+        return (
+            f"You ALREADY read {url} earlier this run -- do NOT fetch it again (re-reading a "
+            "big PDF wastes time). Use what you got from it, or read a DIFFERENT source."
+        )
     if any(g in url.lower() for g in GATED_DOMAINS):
         return (
             f"{url} is a paywalled/gated source -- skip it (a fetch here just burns a call on "
             "a login teaser). Take the figure from the search SNIPPETS, or read an OPEN "
             "source (EIA, OPEC, a company filing)."
         )
-    ctx.deps.note_call()  # count only the real fetch (gated skips above don't burn budget)
+    ctx.deps.note_call()  # count only the real fetch (gated/duplicate skips above don't burn budget)
+    ctx.deps.note_read(url)
     text = await ctx.deps.search.scrape(url)
     return text[:8000]  # cap to keep token cost bounded
